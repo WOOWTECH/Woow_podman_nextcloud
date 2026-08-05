@@ -98,8 +98,8 @@ sudo dnf install podman podman-compose
 ## 3. 複製儲存庫
 
 ```bash
-git clone https://github.com/WOOWTECH/Woow_nextcloud_docker_compose_all.git
-cd Woow_nextcloud_docker_compose_all
+git clone https://github.com/WOOWTECH/Woow_podman_nextcloud.git
+cd Woow_podman_nextcloud
 ```
 
 驗證目錄結構：
@@ -416,7 +416,7 @@ docker exec -it nextcloud-db psql -U nextcloud -d nextcloud \
 crontab -e
 
 # 加入每日凌晨 3:00 自動備份
-0 3 * * * /path/to/Woow_nextcloud_docker_compose_all/scripts/backup.sh >> /var/log/nextcloud-backup.log 2>&1
+0 3 * * * /path/to/Woow_podman_nextcloud/scripts/backup.sh >> /var/log/nextcloud-backup.log 2>&1
 ```
 
 ### 11.3 備份輪替
@@ -431,7 +431,7 @@ find /path/to/backups/ -name "nextcloud_backup_*.tar.gz" -mtime +7 -delete
 在 crontab 備份指令之後加入：
 
 ```bash
-30 3 * * * find /path/to/Woow_nextcloud_docker_compose_all/backups/ -name "nextcloud_backup_*.tar.gz" -mtime +7 -delete
+30 3 * * * find /path/to/Woow_podman_nextcloud/backups/ -name "nextcloud_backup_*.tar.gz" -mtime +7 -delete
 ```
 
 ---

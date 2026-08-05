@@ -69,8 +69,8 @@ Cloudflare Tunnel（SSL 終止）
 
    | 欄位 | 值 |
    |------|-----|
-   | **Repository URL** | `https://github.com/WOOWTECH/Woow_nextcloud_docker_compose_all` |
-   | **Repository reference** | `refs/heads/podman` |
+   | **Repository URL** | `https://github.com/WOOWTECH/Woow_podman_nextcloud` |
+   | **Repository reference** | `refs/heads/main` |
    | **Compose path** | `docker-compose.yml` |
 
 5. 點擊 **Deploy the stack**
@@ -80,7 +80,7 @@ Cloudflare Tunnel（SSL 終止）
 1. 複製 `docker-compose.yml` 的 Raw URL：
 
    ```
-   https://raw.githubusercontent.com/WOOWTECH/Woow_nextcloud_docker_compose_all/podman/docker-compose.yml
+   https://raw.githubusercontent.com/WOOWTECH/Woow_podman_nextcloud/main/docker-compose.yml
    ```
 
 2. 登入 Portainer → **Stacks** → **Add stack** → **Web editor**
@@ -101,8 +101,8 @@ Cloudflare Tunnel（SSL 終止）
 ### 步驟 1：複製儲存庫
 
 ```bash
-git clone https://github.com/WOOWTECH/Woow_nextcloud_docker_compose_all.git
-cd Woow_nextcloud_docker_compose_all
+git clone https://github.com/WOOWTECH/Woow_podman_nextcloud.git
+cd Woow_podman_nextcloud
 ```
 
 ### 步驟 2：設定環境變數
@@ -315,7 +315,7 @@ docker compose logs redis
 ## 檔案結構
 
 ```
-Woow_nextcloud_docker_compose_all/
+Woow_podman_nextcloud/
 ├── docker-compose.yml          # 服務定義（4 個容器）
 ├── .env.example                # 環境變數範本
 ├── .env                        # 您的設定（已被 git 忽略）
@@ -378,3 +378,10 @@ docker exec -u www-data nextcloud-app php occ status
 ## 授權
 
 MIT 授權 - 詳見 [LICENSE](LICENSE)。
+
+---
+
+## 其他部署平台
+
+- **K3s/Kubernetes（Helm chart）** → [Woow_k3s_nextcloud](https://github.com/WOOWTECH/Woow_k3s_nextcloud)
+- **Home Assistant add-on** → [Woow_ha_nextcloud](https://github.com/WOOWTECH/Woow_ha_nextcloud)

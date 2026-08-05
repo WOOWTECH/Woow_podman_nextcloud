@@ -98,8 +98,8 @@ sudo dnf install podman podman-compose
 ## 3. Clone the Repository
 
 ```bash
-git clone https://github.com/WOOWTECH/Woow_nextcloud_docker_compose_all.git
-cd Woow_nextcloud_docker_compose_all
+git clone https://github.com/WOOWTECH/Woow_podman_nextcloud.git
+cd Woow_podman_nextcloud
 ```
 
 Verify the directory structure:
@@ -416,7 +416,7 @@ docker exec -it nextcloud-db psql -U nextcloud -d nextcloud \
 crontab -e
 
 # Add daily backup at 3:00 AM
-0 3 * * * /path/to/Woow_nextcloud_docker_compose_all/scripts/backup.sh >> /var/log/nextcloud-backup.log 2>&1
+0 3 * * * /path/to/Woow_podman_nextcloud/scripts/backup.sh >> /var/log/nextcloud-backup.log 2>&1
 ```
 
 ### 11.3 Backup Rotation
@@ -431,7 +431,7 @@ find /path/to/backups/ -name "nextcloud_backup_*.tar.gz" -mtime +7 -delete
 Add this to crontab after the backup command:
 
 ```bash
-30 3 * * * find /path/to/Woow_nextcloud_docker_compose_all/backups/ -name "nextcloud_backup_*.tar.gz" -mtime +7 -delete
+30 3 * * * find /path/to/Woow_podman_nextcloud/backups/ -name "nextcloud_backup_*.tar.gz" -mtime +7 -delete
 ```
 
 ---

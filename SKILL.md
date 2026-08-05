@@ -5,7 +5,7 @@
 - **Name:** nextcloud-docker-deployment
 - **Description:** Deploy Nextcloud with PostgreSQL (pgvector) using Docker/Podman Compose
 - **Trigger:** User asks to deploy Nextcloud, set up a self-hosted cloud storage, or deploy this repository
-- **Repository:** https://github.com/WOOWTECH/Woow_nextcloud_docker_compose_all
+- **Repository:** https://github.com/WOOWTECH/Woow_podman_nextcloud
 
 ---
 
@@ -35,8 +35,8 @@ This skill guides an AI assistant through deploying a production-ready Nextcloud
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/WOOWTECH/Woow_nextcloud_docker_compose_all.git
-cd Woow_nextcloud_docker_compose_all
+git clone https://github.com/WOOWTECH/Woow_podman_nextcloud.git
+cd Woow_podman_nextcloud
 
 # 2. Create and configure .env
 cp .env.example .env
