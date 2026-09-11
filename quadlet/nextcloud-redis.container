@@ -1,0 +1,28 @@
+# nextcloud-redis.container: distributed memcache and file locking.
+# Reachable only on nextcloud-network, so it needs no "--bind 127.0.0.1" any more.
+# Append-only persistence is kept, which is why it has a data directory.
+[Unit]
+Description=Nextcloud Redis
+Documentation=https://github.com/WOOWTECH/Woow_podman_nextcloud
+PartOf=nextcloud.target
+
+[Container]
+ContainerName=nextcloud-redis
+Image=docker.io/library/redis:8.10.1-alpine
+Network=nextcloud.network
+Volume=@@HOST_REDIS_DIR@@:/data
+Exec=redis-server --appendonly yes
+Label=io.woowtech.app=nextcloud
+LogDriver=journald
+HealthCmd=redis-cli ping || exit 1
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=5
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

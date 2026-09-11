@@ -1,0 +1,66 @@
+# nextcloud-app.container: Nextcloud with Apache, listening on port 80 inside the container.
+#
+# Rendered by scripts/install.sh (decision D2) from ~/.config/nextcloud/nextcloud.env:
+#   HOST_BIND / HOST_PORT          the publish address (127.0.0.1:18080 by default)
+#   HOST_HTML_DIR / HOST_DATA_DIR  /var/www/html and the user files below it
+# The same file is passed to the container with --env-file, so the image's settings
+# (NEXTCLOUD_TRUSTED_DOMAINS, OVERWRITEPROTOCOL, PHP_MEMORY_LIMIT, ...) live there.
+#
+# Reaching the database and Redis without editing config.php:
+#   NC_dbhost=nextcloud-db      Nextcloud reads every NC_<key> environment variable as an
+#                               override of config.php (lib/private/Config.php, ENV_PREFIX
+#                               'NC_') and never writes it back, so an adopted install that
+#                               still says dbhost=127.0.0.1 works and can be rolled back.
+#   REDIS_HOST=nextcloud-redis  activates the image's config/redis.config.php, which is
+#                               merged over the redis block of config.php.
+#
+# Background jobs do NOT run in a container here: systemd/nextcloud-cron.timer runs
+# cron.php every 5 minutes through podman exec.
+[Unit]
+Description=Nextcloud
+Documentation=https://github.com/WOOWTECH/Woow_podman_nextcloud
+PartOf=nextcloud.target
+Requires=nextcloud-db.service nextcloud-redis.service
+After=nextcloud-db.service nextcloud-redis.service
+
+[Container]
+ContainerName=nextcloud-app
+# Upgrades: ONE major version at a time. scripts/upgrade.sh refuses anything else, because
+# the image's entrypoint would refuse it after the old container is already gone.
+Image=docker.io/library/nextcloud:34.0.3-apache
+Network=nextcloud.network
+Volume=@@HOST_HTML_DIR@@:/var/www/html
+Volume=@@HOST_DATA_DIR@@:/var/www/html/data
+PublishPort=@@HOST_BIND@@:@@HOST_PORT@@:80
+EnvironmentFile=%h/.config/nextcloud/nextcloud.env
+# --env beats --env-file, so these cannot drift from the database unit.
+Environment=POSTGRES_HOST=nextcloud-db
+Environment=POSTGRES_DB=nextcloud
+Environment=POSTGRES_USER=nextcloud
+Environment=NC_dbhost=nextcloud-db
+Environment=REDIS_HOST=nextcloud-redis
+Secret=nextcloud-db-password,type=env,target=POSTGRES_PASSWORD
+# Install-time only: ignored once config.php says the instance is installed.
+Secret=nextcloud-admin-password,type=env,target=NEXTCLOUD_ADMIN_PASSWORD
+Label=io.woowtech.app=nextcloud
+LogDriver=journald
+HealthCmd=curl -fsS -m 10 -o /dev/null http://localhost/status.php || exit 1
+HealthInterval=30s
+HealthTimeout=15s
+HealthRetries=3
+# The entrypoint rsyncs the release and runs `occ upgrade` on a version bump.
+HealthStartPeriod=600s
+
+[Service]
+# Readiness gate: podman 4.9.3 ignores Notify=healthy, so poll the database and Redis
+# healthchecks defined in their units.
+ExecStartPre=/usr/bin/timeout 300 /bin/sh -c 'until /usr/bin/podman healthcheck run nextcloud-db >/dev/null 2>&1 && /usr/bin/podman healthcheck run nextcloud-redis >/dev/null 2>&1; do sleep 2; done'
+Restart=always
+RestartSec=10
+# Covers the readiness gate and a first-time image pull. The entrypoint's rsync and
+# `occ upgrade` run AFTER the unit is active (--sdnotify=conmon), so scripts/upgrade.sh and
+# tests/smoke.sh poll status.php instead of relying on this timeout.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target
