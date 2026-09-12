@@ -1,387 +1,326 @@
-# Nextcloud + PostgreSQL (pgvector) Docker/Podman 部署
+# Nextcloud on rootless Podman（Quadlet + systemd）
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Docker Compose](https://img.shields.io/badge/Docker%20Compose-3.8-blue)](docker-compose.yml)
-[![Nextcloud](https://img.shields.io/badge/Nextcloud-Stable-blue)](https://nextcloud.com/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20+%20pgvector-336791)](https://github.com/pgvector/pgvector)
+以 **rootless Podman Quadlet unit** 部署 [Nextcloud](https://nextcloud.com/)，搭配 PostgreSQL 16
+（pgvector）與 Redis，全部交由使用者的 systemd 管理。unit 就是部署本身：開機自動啟動（需要
+linger）、容器當掉時自動重啟、背景工作由 timer 執行，所有版本都釘選在這個 repo 裡。
 
-[English](README.md) | [繁體中文](#概述)
+[English version](README.md)
 
----
-
-## 概述
-
-使用 Docker/Podman Compose 部署生產級 Nextcloud，搭配 PostgreSQL 16（啟用 pgvector）、Redis 快取及自動化背景任務。針對家用伺服器與自架環境優化，支援 Cloudflare Tunnel 安全外部存取。
-
-## 功能特色
-
-| 功能 | 說明 |
-|------|------|
-| **Nextcloud（穩定版）** | 最新穩定版本，搭配 Apache 網頁伺服器 |
-| **PostgreSQL 16 + pgvector** | 向量資料庫，支援 AI 功能（Recognize 照片標記應用程式） |
-| **Redis** | 記憶體快取與檔案鎖定，提升效能 |
-| **Cron** | 獨立容器處理 Nextcloud 背景任務 |
-| **備份/還原** | Shell 腳本完整備份與還原資料 |
-| **Cloudflare Tunnel** | 預先設定安全外部存取，無需開啟連接埠 |
-| **健康檢查** | 所有服務皆包含健康檢查，確保穩定性 |
-
-## 架構圖
+## 架構
 
 ```
-網際網路
-   │
-   ▼
-Cloudflare Tunnel（SSL 終止）
-   │
-   ▼
-主機:18080 ──► nextcloud-app（Apache + PHP）
-                    │
-        ┌───────────┼───────────┐
-        ▼           ▼           ▼
-   nextcloud-db  nextcloud-   nextcloud-
-   （PostgreSQL    redis        cron
-    16+pgvector） （快取）     （背景任務）
-        │
-   nextcloud-network（bridge 網路）
+        systemctl --user start|stop|restart nextcloud.target
+                              │
+   ┌──────────────────────────┼───────────────────────────┐
+   │                          │                           │
+nextcloud-db.service   nextcloud-redis.service   nextcloud-app.service
+pgvector/pgvector      redis:8.10.1-alpine       nextcloud:34.0.3-apache
+ :0.8.6-pg16                 │                           │
+   │ HOST_POSTGRES_DIR       │ HOST_REDIS_DIR            │ HOST_HTML_DIR
+   │                         │                           │ HOST_DATA_DIR
+   └──────────── network nextcloud-network ──────────────┘
+                                                          │
+                              PublishPort HOST_BIND:HOST_PORT -> 80
+                              （預設 127.0.0.1:18080；對外由 Cloudflare
+                                Tunnel 或 NPM 提供）
+
+        nextcloud-cron.timer ──每 5 分鐘──> nextcloud-cron.service
+              podman exec -u www-data nextcloud-app php -f cron.php
 ```
 
-### 服務詳細資訊
+| 檔案 | unit | 內容 |
+|---|---|---|
+| `quadlet/nextcloud.network` | `nextcloud-network.service` | bridge 網路 `nextcloud-network` |
+| `quadlet/nextcloud-db.container` | `nextcloud-db.service` | PostgreSQL 16 + pgvector |
+| `quadlet/nextcloud-redis.container` | `nextcloud-redis.service` | 分散式快取與檔案鎖 |
+| `quadlet/nextcloud-app.container` | `nextcloud-app.service` | Nextcloud（Apache，容器內 80 埠） |
+| `systemd/nextcloud-cron.service` | `nextcloud-cron.service` | 執行一次 `cron.php` |
+| `systemd/nextcloud-cron.timer` | `nextcloud-cron.timer` | 每 5 分鐘 |
+| `systemd/nextcloud.target` | `nextcloud.target` | 一次操作整個堆疊 |
 
-| 服務 | 映像檔 | 連接埠 | 用途 |
-|------|--------|--------|------|
-| `nextcloud` | `nextcloud:stable` | `18080:80` | 主要應用程式伺服器 |
-| `db` | `pgvector/pgvector:pg16` | 內部 | 具向量支援的 PostgreSQL 資料庫 |
-| `redis` | `redis:alpine` | 內部 | 快取與檔案鎖定 |
-| `cron` | `nextcloud:stable` | 無 | 背景任務執行器 |
+安裝位置：`~/.config/containers/systemd/`（Quadlet）、`~/.config/systemd/user/`（target、cron
+service 與 timer）、`~/.config/nextcloud/nextcloud.env`（設定，權限 0600）。密碼一律使用
+podman secret，不會出現在環境檔裡。
 
-## 一鍵部署至 Portainer
+**不再有 cron 容器。** 舊的 `nextcloud-cron` 容器跑的是 busybox crond；改成 `Type=oneshot`
+service 加 timer 之後，執行不會重疊、可以用 `systemctl --user list-timers` 看到下一次時間，
+而且 app 停著的時候是「跳過」而不是「失敗」。
 
-使用 Portainer 的 Stack 功能，可透過 GitHub Repository 網址快速部署本專案。
-
-[![Deploy to Portainer](https://img.shields.io/badge/Deploy_to-Portainer-13BEF9?style=for-the-badge&logo=portainer&logoColor=white)](#一鍵部署至-portainer)
-
-### 使用 Git Repository 部署（推薦）
-
-1. 登入你的 Portainer 管理介面
-2. 進入 **Stacks** → **Add stack**
-3. 選擇 **Repository**
-4. 填入以下資訊：
-
-   | 欄位 | 值 |
-   |------|-----|
-   | **Repository URL** | `https://github.com/WOOWTECH/Woow_podman_nextcloud` |
-   | **Repository reference** | `refs/heads/main` |
-   | **Compose path** | `docker-compose.yml` |
-
-5. 點擊 **Deploy the stack**
-
-### 使用 Web Editor 部署
-
-1. 複製 `docker-compose.yml` 的 Raw URL：
-
-   ```
-   https://raw.githubusercontent.com/WOOWTECH/Woow_podman_nextcloud/main/docker-compose.yml
-   ```
-
-2. 登入 Portainer → **Stacks** → **Add stack** → **Web editor**
-3. 使用 `curl` 或瀏覽器取得上述 URL 的內容，貼入編輯器
-4. 設定環境變數（參考 `.env.example`）
-5. 點擊 **Deploy the stack**
+**資料庫與 Redis 位於私有 bridge 網路**，不再掛在主機的 loopback 上。先前的手動部署所有容器
+都用 `--network host`，而 `pg_hba.conf` 對 `127.0.0.1` 是 `trust`，也就是說主機上任何行程、
+以及任何其他 host network 容器，都能以超級使用者身分免密碼連進 PostgreSQL，Redis 也沒有密碼。
 
 ## 系統需求
 
-- **Docker**（20.10+）或 **Podman**（4.0+）含 compose 外掛
-- **4+ GB 記憶體**（建議 8-16 GB）
-- **4+ CPU 核心**（建議）
-- **20+ GB 磁碟空間**（依使用者資料量而定）
-- （選用）**Cloudflare 帳號**用於 Tunnel 存取
-
-## 快速開始
-
-### 步驟 1：複製儲存庫
+- Ubuntu 24.04 或同級系統，**podman >= 4.9.3** rootless，systemd 255 使用者 unit
+- 服務帳號啟用 linger（`sudo loginctl enable-linger $USER`），登出後堆疊才會繼續執行
+- 映像檔約 1.3 GB，另外還要放 html 目錄（約 900 MB）、資料庫與使用者檔案
+- PostgreSQL 目錄必須放在**本機磁碟**（不可用 NFS 或 SMB），`install.sh` 會檢查
 
 ```bash
-git clone https://github.com/WOOWTECH/Woow_podman_nextcloud.git
-cd Woow_podman_nextcloud
+podman --version && systemctl --user show-environment >/dev/null && echo "user manager ok"
 ```
 
-### 步驟 2：設定環境變數
+## 安裝
 
 ```bash
-cp .env.example .env
-nano .env   # 或使用任何文字編輯器
+git clone https://github.com/WOOWTECH/Woow_podman_nextcloud ~/woow-quadlet/Woow_podman_nextcloud
+cd ~/woow-quadlet/Woow_podman_nextcloud
+tests/dryrun.sh                               # 選用：驗證所有 unit，不會建立任何東西
+scripts/install.sh                            # 第一次執行：建立設定檔後停下
+$EDITOR ~/.config/nextcloud/nextcloud.env     # 四個 HOST_*_DIR 路徑與信任網域
+scripts/install.sh                            # 安裝、啟動並執行 smoke 測試
 ```
 
-**以下欄位必須修改：**
-
-| 變數 | 說明 | 範例 |
-|------|------|------|
-| `POSTGRES_PASSWORD` | 設定強密碼 | `MyS3cur3DbP@ss!` |
-| `NEXTCLOUD_ADMIN_PASSWORD` | 設定管理員強密碼 | `Adm1nP@ssw0rd!` |
-| `NEXTCLOUD_TRUSTED_DOMAINS` | 您的網域（空格分隔） | `localhost cloud.example.com 192.168.1.100` |
-
-### 步驟 3：建立資料目錄
+第一次安裝會等 entrypoint 解開 Nextcloud，接著設定 cron 背景工作模式、建立 `vector` 擴充、
+補上缺少的資料庫索引，並印出讀取管理者密碼的方式：
 
 ```bash
-mkdir -p data/{nextcloud/html,nextcloud/data,postgres,redis}
+podman secret inspect --showsecret nextcloud-admin-password
 ```
 
-### 步驟 4：啟動所有服務
+接著打開 `http://127.0.0.1:18080/`（或你設定的 `HOST_BIND:HOST_PORT`）。
+**你用來連線的每一個名稱或位址都必須列在 `NEXTCLOUD_TRUSTED_DOMAINS`**，否則 Nextcloud 會
+回應「透過不信任的網域存取」。
+
+其他選項：`--db-password-file F` 與 `--admin-password-file F`（僅第一次安裝）、`--no-start`、
+`--no-smoke`、`--smoke-timeout S`、`--dry-run`（只算出結果並驗證）。
+
+## 設定
+
+`~/.config/nextcloud/nextcloud.env`，權限 0600，只能寫 `KEY=value`：不要加引號、不要 `export`、
+也不要在值後面接 `# 註解`。`HOST_*` 會在安裝時寫進 unit 檔（決策 D2），其餘的鍵會傳給 app
+容器，因此
+[映像檔支援的環境變數](https://github.com/nextcloud/docker#environment-variables)都能用。
+改完之後重新執行 `scripts/install.sh`，它只會重啟真的有變動的 unit。
+
+| 鍵 | 預設值 | 意義 |
+|---|---|---|
+| `HOST_BIND` | `127.0.0.1` | 發布位址。`0.0.0.0` 代表對所有介面開放 |
+| `HOST_PORT` | `18080` | 發布的埠（容器內 Apache 聽 80） |
+| `HOST_HTML_DIR` | `%h/.local/share/nextcloud/html` | `/var/www/html`：程式碼、app 與 `config/config.php` |
+| `HOST_DATA_DIR` | `%h/.local/share/nextcloud/data` | `/var/www/html/data`：使用者檔案，會一直長大的就是它 |
+| `HOST_POSTGRES_DIR` | `%h/.local/share/nextcloud/postgres` | PGDATA，只能放本機磁碟 |
+| `HOST_REDIS_DIR` | `%h/.local/share/nextcloud/redis` | Redis append-only 檔案 |
+| `NEXTCLOUD_ADMIN_USER` | `admin` | 僅第一次安裝時使用 |
+| `NEXTCLOUD_TRUSTED_DOMAINS` | `localhost 127.0.0.1` | 以空白分隔，第一次啟動時寫入 |
+| `OVERWRITEPROTOCOL` | 空白 | 前面有 TLS 代理或 tunnel 但不送 `X-Forwarded-Proto` 時設為 `https` |
+| `OVERWRITECLIURL`、`TRUSTED_PROXIES` | 空白 | 由映像檔的 `reverse-proxy.config.php` 讀取 |
+| `PHP_MEMORY_LIMIT`、`PHP_UPLOAD_LIMIT` | `512M` | PHP 限制 |
+
+每個 `HOST_*_DIR` 都是絕對路徑，或以 `%h/` 開頭代表家目錄。已經有 Nextcloud 資料的路徑會
+原地沿用，不會複製也不會搬移（決策 D9）。
+
+**絕對不要加開頭是 `NC_` 的鍵。** Nextcloud 會把 `NC_<key>` 當成 `config.php` 的覆寫；
+`install.sh` 發現就會拒絕。unit 自己會設定 `NC_dbhost` 與 `REDIS_HOST`，這正是為什麼
+`config.php` 仍寫著 `dbhost=127.0.0.1` 的既有站台，不必改設定就能在 bridge 上連到資料庫，
+回滾時同樣不必改。
+
+`POSTGRES_HOST`、`POSTGRES_DB`、`POSTGRES_USER` 與 `REDIS_HOST` 固定寫在 unit 裡
+（`--env` 優先於 `--env-file`），不會和資料庫 unit 不一致。
+
+**Secret**（podman secret，第一次安裝時建立，不會被印出來）：
+
+| Secret | 用途 |
+|---|---|
+| `nextcloud-db-password` | `POSTGRES_PASSWORD`：initdb，以及 Nextcloud 第一次安裝 |
+| `nextcloud-admin-password` | `NEXTCLOUD_ADMIN_PASSWORD`：僅安裝時使用，之後會被忽略 |
+
+Nextcloud 安裝完成後，是以 `config.php` 裡的 `dbpassword` 用 `oc_admin` 這個角色連線；那份
+設定屬於 html 目錄裡的 Nextcloud 自有狀態。
+
+## 日常操作
 
 ```bash
-# 使用 Docker Compose
-docker compose up -d
-
-# 使用 Podman Compose
-podman-compose up -d
+systemctl --user status nextcloud-app.service       # 單一 unit
+systemctl --user restart nextcloud.target           # 整個堆疊
+journalctl --user -u nextcloud-app.service -f       # 日誌（LogDriver=journald）
+systemctl --user list-timers nextcloud-cron.timer   # 下一次 cron.php
+systemctl --user start nextcloud-cron.service       # 立刻執行背景工作
+tests/smoke.sh                                      # 健康檢查
+tests/smoke.sh --public-url https://cloud.example.com/
 ```
 
-### 步驟 5：確認服務運行狀態
+`occ` 不允許用 root 執行，一律以 `www-data` 身分執行：
 
 ```bash
-# 檢查服務狀態
-docker compose ps        # 或：podman-compose ps
+occ() { podman exec -u www-data nextcloud-app php /var/www/html/occ "$@"; }
 
-# 預期結果：所有服務顯示 "Up" 或 "healthy"
+occ status
+occ user:list
+occ files:scan --all
+occ app:update --all
+occ config:system:set trusted_domains 2 --value=cloud.example.com
 ```
 
-### 步驟 6：啟用 pgvector 擴充
+資料庫：
 
 ```bash
-docker exec -it nextcloud-db psql -U nextcloud -d nextcloud \
-  -c "CREATE EXTENSION IF NOT EXISTS vector;"
+podman exec -it nextcloud-db psql -U nextcloud -d nextcloud
+podman exec nextcloud-db psql -U nextcloud -d nextcloud -c "SELECT pg_size_pretty(pg_database_size('nextcloud'));"
 ```
 
-### 步驟 7：存取 Nextcloud
+### AI 相片標記（Recognize）
 
-- **本機存取：** http://localhost:18080
-- **透過 Cloudflare Tunnel：** https://your-domain.com
+第一次安裝時 `install.sh` 會建立 `vector` 擴充，因此可以直接在 **App** 裡安裝
+[Recognize](https://apps.nextcloud.com/apps/recognize)，並到 **設定 → Recognize** 設定。
+既有站台請先確認：
 
-使用您在 `.env` 中設定的管理員帳號密碼登入。
+```bash
+podman exec nextcloud-db psql -U nextcloud -d nextcloud -c "SELECT extname, extversion FROM pg_extension;"
+```
 
-## 安裝後設定
+### 搭配 Cloudflare Tunnel 或 Nginx Proxy Manager
 
-### 安裝 Recognize 應用程式（AI 照片標記）
+`HOST_BIND` 維持 `127.0.0.1`，把 tunnel 或代理指向 `http://localhost:18080`，並在
+`~/.config/nextcloud/nextcloud.env` 設定：
 
-1. 以管理員身分登入
-2. 前往 **應用程式** > 搜尋 "**Recognize**"
-3. 點擊 **安裝**
-4. 在 **設定** > **Recognize** 中設定
+```ini
+OVERWRITEPROTOCOL=https
+OVERWRITECLIURL=https://cloud.example.com
+TRUSTED_PROXIES=127.0.0.1
+NEXTCLOUD_TRUSTED_DOMAINS=localhost cloud.example.com
+```
 
-### 設定背景任務為 Cron
+然後再執行一次 `scripts/install.sh`。沒有設定 `TRUSTED_PROXIES` 的話，Nextcloud 會把 bridge
+的 gateway 當成所有請求的來源，暴力破解防護會變成全體共用，日誌也看不到真正的來源 IP。
 
-1. 前往 **設定** > **基本設定**
-2. 在 **背景任務** 中選擇 **Cron**
+tunnel 本身由
+[Woow_cloudflare_tunnel_webgui](https://github.com/WOOWTECH/Woow_cloudflare_tunnel_webgui)
+部署，這個 repo 不會安裝 `cloudflared`。
 
-### Cloudflare Tunnel 設定
+## 升級
 
-1. 在 [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) 儀表板建立 tunnel
-2. 將公開主機名稱指向：`http://localhost:18080`
-3. 在 `.env` 中將您的網域加入 `NEXTCLOUD_TRUSTED_DOMAINS`
-4. 在 `.env` 中設定 `OVERWRITEPROTOCOL=https`
-5. 重新啟動：`docker compose restart nextcloud`
+repo 就是版本的唯一真相：修改 `quadlet/nextcloud-app.container` 的 `Image=` 並 commit，然後：
+
+```bash
+git pull
+scripts/upgrade.sh            # --repair 會額外執行 maintenance:repair --include-expensive
+```
+
+**一次只能升一個大版本。** Nextcloud 的 entrypoint 本來就會拒絕跳版，但那時舊容器已經消失了，
+所以 `upgrade.sh` 會先比對已安裝的 `version.php` 與映像檔的 `NEXTCLOUD_VERSION`，在任何東西
+停止之前就拒絕。降版與 PostgreSQL 大版本變更同樣會被擋下。
+
+接著它會做一份冷備份（dump、roles、`config/`、html 目錄與資料庫目錄），安裝新的 unit，然後
+輪詢 `status.php` 最多 30 分鐘：`--sdnotify=conmon` 會在 entrypoint 還在 rsync 新版本、還在跑
+`occ upgrade` 的時候就把 unit 標記為 active。完成後會補索引、補欄位、補主鍵並更新 app。
+**失敗會自動回滾**——Nextcloud 無法降版，所以 html 目錄與資料庫必須一起回去。
+
+不要釘 `nextcloud:stable`，那個 tag 會移動，容器一旦啟動在比資料還新的版本上就會拒絕執行。
+
+**PostgreSQL 大版本升級**（16 → 17）是另一件工作：`scripts/backup.sh --cold`、改資料庫映像檔、
+把 `HOST_POSTGRES_DIR` 移開、`scripts/install.sh`，最後 `scripts/restore.sh`。
 
 ## 備份與還原
 
-### 建立備份
-
 ```bash
-./scripts/backup.sh
-# 輸出：backups/nextcloud_backup_YYYYMMDD_HHMMSS.tar.gz
+scripts/backup.sh                    # 維護模式、DB dump + roles、config、使用者檔案
+scripts/backup.sh --no-data          # 不含使用者檔案
+scripts/backup.sh --cold             # 另外停下堆疊，完整複製 html 與 PGDATA
+scripts/restore.sh ~/backups/nextcloud/<timestamp> [--with-html] [--yes]
 ```
 
-備份包含：
-- PostgreSQL 資料庫傾印
-- Nextcloud 使用者資料（`data/`）
-- Nextcloud 設定檔（`config/`）
+備份目錄權限 0700，內含 `SHA256SUMS`，`restore.sh` 會驗證。裡面有資料庫密碼與管理者密碼：
+請另外保存在這台主機之外，並比照密碼本身處理。`roles.sql` 會跟著 dump 一起備份，因為
+`config.php` 是以 `oc_admin` 連線的，而 `pg_dump` 不會帶角色。
 
-### 從備份還原
+備份期間會開啟維護模式，並由 trap 在結束時關閉，**失敗時也一樣**——不像舊版腳本把失敗的
+`occ maintenance:mode --on` 用 `|| true` 吞掉，結果備份的是一個還在服務中的站台。
+
+每天自動備份（以服務帳號執行）：
 
 ```bash
-./scripts/restore.sh backups/nextcloud_backup_YYYYMMDD_HHMMSS.tar.gz
+systemd-run --user --on-calendar='*-*-* 03:30:00' --unit=nextcloud-backup \
+  ~/woow-quadlet/Woow_podman_nextcloud/scripts/backup.sh
 ```
 
-> **警告：** 此操作將覆蓋所有現有資料。系統會要求您確認。
-
-## 實用指令
-
-### 日誌與監控
+## 解除安裝
 
 ```bash
-# 查看所有服務的即時日誌
-docker compose logs -f
-
-# 查看特定服務的日誌
-docker compose logs -f nextcloud
-docker compose logs -f db
+scripts/uninstall.sh                 # 停止並移除 unit 與 timer，資料全部保留
+scripts/uninstall.sh --purge --yes   # 另外刪除網路與兩個 secret
 ```
 
-### 容器管理
+`--purge` 會先把兩個 secret 與設定檔匯出到 `~/backups/nextcloud/purge-<timestamp>/`，而且
+**絕對不會**刪掉四個資料目錄：它只會印出對應的 `podman unshare rm -rf` 指令，避免打錯路徑
+就毀掉使用者檔案。
+
+## 從既有的 compose 或手動部署遷移
+
+`scripts/migrate-legacy.sh` 會原地沿用 html、data、PostgreSQL 與 Redis 目錄——路徑是從
+`podman inspect` 讀出來的，不是用猜的，也完全不複製——並保留舊容器與舊 unit 供回滾。
+停機時間是 8–12 分鐘的維護模式，請預留 30 分鐘。
 
 ```bash
-# 停止所有服務
-docker compose down
+# 1. 舊堆疊照常執行時先檢查與準備（不停機）
+scripts/migrate-legacy.sh --legacy-dir ~/podman/nextcloud --dry-run
+scripts/migrate-legacy.sh --legacy-dir ~/podman/nextcloud --bind 0.0.0.0 --prepare-only
 
-# 重新啟動所有服務
-docker compose restart
+# 2. 正式切換（開始停機）：維護模式、dump、停止、冷備份、改名、安裝、smoke
+scripts/migrate-legacy.sh --legacy-dir ~/podman/nextcloud --bind 0.0.0.0 --yes
 
-# 更新映像檔後重建（拉取最新版本）
-docker compose pull && docker compose up -d
+# 3. 有問題時（約 3 分鐘；兩套堆疊共用同樣的目錄）
+scripts/migrate-legacy.sh --rollback --yes
 ```
 
-### Nextcloud 管理（occ 指令）
+**要先確認的是資料庫密碼。** host network 部署是透過 `127.0.0.1` 連 PostgreSQL，而
+`pg_hba.conf` 對它是 `trust`，所以 `config.php` 裡給 `oc_admin` 的那組密碼從來沒被真正驗證過；
+換到 bridge 之後它就必須能用。步驟 1 會拿它去比對 `pg_authid` 裡的 SCRAM verifier——只會印出
+`match=true` 或 `match=false`，絕不會印出密碼——不符就拒絕切換。`--fix-db-password` 會把角色的
+密碼設成 `config.php` 已經在用的那一組，對舊堆疊而言完全沒有影響。
+
+這次遷移刻意改變的其他事情：host network 改成 bridge（因此 `apache-ports.conf` 與
+`apache-site.conf` 覆寫檔功成身退，Apache 在容器內聽 80）、cron 容器改成 timer、浮動 tag
+`stable`、`pg16`、`alpine` 改成它們今天實際指到的確切版本，密碼也從舊的 `.env`
+（連資料庫容器都拿得到整份，包括管理者密碼）搬進 podman secret。
+
+切換過程會先保存 `config.php`：新堆疊第一次寫設定時會把 `redis.host=nextcloud-redis` 寫進去，
+`--rollback` 會把保存的那份放回去。
+
+**觀察期結束後**（兩週，中間至少重開機一次）：
 
 ```bash
-# 進入 Nextcloud 容器
-docker exec -it nextcloud-app bash
-
-# 直接執行 occ 指令
-docker exec -u www-data nextcloud-app php occ <指令>
-
-# 掃描所有使用者檔案
-docker exec -u www-data nextcloud-app php occ files:scan --all
-
-# 更新所有應用程式
-docker exec -u www-data nextcloud-app php occ app:update --all
-
-# 檢查 Nextcloud 狀態
-docker exec -u www-data nextcloud-app php occ status
-```
-
-### 資料庫操作
-
-```bash
-# 連線到 PostgreSQL
-docker exec -it nextcloud-db psql -U nextcloud -d nextcloud
-
-# 檢查資料庫大小
-docker exec -it nextcloud-db psql -U nextcloud -d nextcloud \
-  -c "SELECT pg_size_pretty(pg_database_size('nextcloud'));"
-
-# 驗證 pgvector 擴充
-docker exec -it nextcloud-db psql -U nextcloud -d nextcloud \
-  -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
+podman rm nextcloud-app-legacy-YYYYMMDD nextcloud-cron-legacy-YYYYMMDD \
+          nextcloud-db-legacy-YYYYMMDD nextcloud-redis-legacy-YYYYMMDD
+rm ~/.config/systemd/user/podman-nextcloud.service ~/.local/bin/start-migrated-nextcloud
+systemctl --user daemon-reload
+podman untag docker.io/library/nextcloud:stable docker.io/pgvector/pgvector:pg16 docker.io/library/redis:alpine
+occ config:system:set dbhost --value=nextcloud-db     # 讓 config.php 說的是實話
+occ config:system:get trusted_domains                 # 依索引刪掉已經沒用的項目
 ```
 
 ## 疑難排解
 
-### 資料庫連線錯誤
+| 症狀 | 原因與處理 |
+|---|---|
+| `Unit nextcloud-app.service not found` | 產生器拒絕了某個檔案。執行 `tests/dryrun.sh`，再 `systemctl --user daemon-reload` |
+| 安裝被拒：*legacy container* | 有非 Quadlet 容器佔用了名稱。Quadlet 的 `--replace` 會直接刪掉它：依訊息提示改名，或改用 `migrate-legacy.sh` |
+| 「透過不信任的網域存取」 | 把名稱加進 `NEXTCLOUD_TRUSTED_DOMAINS` 再跑一次 `install.sh`，或 `occ config:system:set trusted_domains N --value=…` |
+| `password authentication failed for user "oc_admin"` | 沿用的 `config.php` 密碼從未通過真正的驗證。`scripts/migrate-legacy.sh --fix-db-password` |
+| `occ` 說 *Console has to be executed with the user that owns the file* | 你沒有加 `-u www-data` |
+| 走 tunnel 但連結是 `http://` | 設定 `OVERWRITEPROTOCOL=https` 與 `TRUSTED_PROXIES` |
+| 背景工作停住 | `systemctl --user list-timers nextcloud-cron.timer`，再看 `journalctl --user -u nextcloud-cron.service` |
+| 重開機後堆疊沒有回來 | linger 沒開：`sudo loginctl enable-linger $USER` |
+| `occ config:system:get dbhost` 顯示 `127.0.0.1` | 沿用的站台這樣是正常的：unit 的 `NC_dbhost` 會覆寫它，而且永遠不會寫回檔案 |
+
+## Docker Compose
+
+這個 repo 只提供 Quadlet。最後一個含 `docker-compose.yml` 的版本標記為
+[`compose-final`](https://github.com/WOOWTECH/Woow_podman_nextcloud/tree/compose-final)：
 
 ```bash
-# 檢查 PostgreSQL 是否健康
-docker exec nextcloud-db pg_isready -U nextcloud
-
-# 檢查資料庫日誌
-docker compose logs db
+git clone --branch compose-final https://github.com/WOOWTECH/Woow_podman_nextcloud
 ```
 
-### 權限問題
-
-```bash
-docker exec nextcloud-app chown -R www-data:www-data /var/www/html/data
-docker exec nextcloud-app chown -R www-data:www-data /var/www/html/config
-```
-
-### 重設管理員密碼
-
-```bash
-docker exec -u www-data nextcloud-app php occ user:resetpassword admin
-```
-
-### 信任網域錯誤
-
-如果看到「透過不信任的網域存取」：
-
-```bash
-# 透過 occ 新增網域
-docker exec -u www-data nextcloud-app php occ config:system:set \
-  trusted_domains 1 --value=your-domain.com
-
-# 或更新 .env 中的 NEXTCLOUD_TRUSTED_DOMAINS 後重新啟動
-docker compose restart nextcloud
-```
-
-### Redis 連線問題
-
-```bash
-# 確認 Redis 正在運行
-docker exec nextcloud-redis redis-cli ping
-# 預期回應：PONG
-
-# 檢查 Redis 日誌
-docker compose logs redis
-```
-
-## 檔案結構
-
-```
-Woow_podman_nextcloud/
-├── docker-compose.yml          # 服務定義（4 個容器）
-├── .env.example                # 環境變數範本
-├── .env                        # 您的設定（已被 git 忽略）
-├── .gitignore                  # Git 忽略規則
-├── README.md                   # 英文說明文件
-├── README_zh-TW.md             # 繁體中文說明文件（本檔案）
-├── DEPLOYMENT.md               # 詳細部署指南（英文）
-├── DEPLOYMENT_zh-TW.md         # 詳細部署指南（中文）
-├── SKILL.md                    # AI 助手部署技能檔
-├── LICENSE                     # MIT 授權
-├── scripts/
-│   ├── backup.sh               # 備份腳本
-│   └── restore.sh              # 還原腳本
-├── docs/
-│   └──（設計文件）
-└── data/                       # 執行時資料（已被 git 忽略）
-    ├── nextcloud/
-    │   ├── html/               # Nextcloud 應用程式檔案
-    │   └── data/               # 使用者上傳檔案
-    ├── postgres/               # PostgreSQL 資料庫檔案
-    └── redis/                  # Redis 持久化資料
-```
-
-## 環境變數參考
-
-| 變數 | 預設值 | 必填 | 說明 |
-|------|--------|------|------|
-| `POSTGRES_DB` | `nextcloud` | 否 | PostgreSQL 資料庫名稱 |
-| `POSTGRES_USER` | `nextcloud` | 否 | PostgreSQL 使用者名稱 |
-| `POSTGRES_PASSWORD` | - | **是** | PostgreSQL 密碼 |
-| `NEXTCLOUD_ADMIN_USER` | `admin` | 否 | Nextcloud 管理員使用者名稱 |
-| `NEXTCLOUD_ADMIN_PASSWORD` | - | **是** | Nextcloud 管理員密碼 |
-| `NEXTCLOUD_TRUSTED_DOMAINS` | `localhost` | 否 | 信任的網域（空格分隔） |
-| `NEXTCLOUD_PORT` | `18080` | 否 | 主機連接埠 |
-| `OVERWRITEPROTOCOL` | `https` | 否 | URL 產生使用的協定 |
-| `OVERWRITECLIURL` | - | 否 | CLI 操作的完整 URL |
-| `TRUSTED_PROXIES` | - | 否 | 信任的代理 CIDR 範圍 |
-
-## 安全注意事項
-
-- **絕對不要將 `.env` 提交**到版本控制（已在 `.gitignore` 中設定）
-- 為 `POSTGRES_PASSWORD` 和 `NEXTCLOUD_ADMIN_PASSWORD` 使用強密碼
-- 定期更新 Nextcloud 和所有應用程式
-- 初始設定後為管理員帳號啟用雙重驗證（2FA）
-- 在 **設定** > **總覽** 中檢視 Nextcloud 安全警告
-
-## 更新方式
-
-```bash
-# 拉取最新映像檔
-docker compose pull
-
-# 使用新映像檔重建容器
-docker compose up -d
-
-# 驗證更新
-docker exec -u www-data nextcloud-app php occ status
-```
+新的 Docker 部署請參考 Nextcloud 官方的
+[docker 範例](https://github.com/nextcloud/docker#running-this-image-with-docker-compose)。
 
 ## 授權
 
-MIT 授權 - 詳見 [LICENSE](LICENSE)。
+MIT License，詳見 [LICENSE](LICENSE)。
 
----
+## 其他部署方式
 
-## 其他部署平台
-
-- **K3s/Kubernetes（Helm chart）** → [Woow_k3s_nextcloud](https://github.com/WOOWTECH/Woow_k3s_nextcloud)
+- **K3s / Kubernetes（Helm chart）** → [Woow_k3s_nextcloud](https://github.com/WOOWTECH/Woow_k3s_nextcloud)
 - **Home Assistant add-on** → [Woow_ha_nextcloud](https://github.com/WOOWTECH/Woow_ha_nextcloud)
