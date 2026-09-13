@@ -271,7 +271,7 @@ containers and unit for rollback. Downtime is 8–12 minutes of maintenance mode
 scripts/migrate-legacy.sh --legacy-dir ~/podman/nextcloud --dry-run
 scripts/migrate-legacy.sh --legacy-dir ~/podman/nextcloud --bind 0.0.0.0 --prepare-only
 
-# 2. cutover (downtime starts): maintenance mode, dump, stop, cold tar, rename, install, smoke
+# 2. cutover (downtime starts): maintenance mode, dump, stop, cold tar, retire, install, smoke
 scripts/migrate-legacy.sh --legacy-dir ~/podman/nextcloud --bind 0.0.0.0 --yes
 
 # 3. if anything is wrong (about 3 minutes; both stacks share the same directories)
@@ -295,9 +295,45 @@ podman secrets.
 The cutover saves `config.php` before the new stack starts: the first configuration write
 persists `redis.host=nextcloud-redis` into it, and `--rollback` puts the saved copy back.
 
+### How the legacy containers are kept for rollback
+
+Renaming a legacy container and leaving it stopped is a rollback path only while nothing
+starts it again. The user unit `podman-restart.service` runs
+`podman start --all --filter restart-policy=always` at boot, so on a host where that unit is
+**enabled** a renamed, stopped container whose restart policy is exactly `always` revives at
+the next boot and fights the new Quadlet container for its name, ports and volumes — here, a second
+PostgreSQL and a second Apache on the same html and data directories.
+podman 4.9.3 cannot repair that afterwards: `podman update` only rewrites cgroup limits, and a
+restart policy is fixed at create time.
+
+The script therefore asks `ql_rollback_strategy` — which reads this host's real state, never
+its name — and takes one of two paths. `--dry-run` prints which one applies here.
+
+| Answer | When | What the cutover does | What `--rollback` does |
+|---|---|---|---|
+| `rename` | the unit is disabled, or no legacy container has policy `always` | `podman rename <name> <name>-legacy-YYYYMMDD`, left stopped | renames it back |
+| `capture` | the unit is enabled **and** a legacy container has policy `always` | writes `<backup>/legacy-container/<name>/` (inspect, create command, image, policy, mounts, networks) and then a plain `podman rm` — never `podman rm -v`, which would delete the anonymous volumes | `ql_recreate_container` recreates it stopped, with its original restart policy |
+
+On `woowtechopenclaw` all four compose-era Nextcloud containers carry `restart=always`
+and `podman-restart.service` is enabled, so a migration there takes the `capture` path. On
+`toypark1234` that unit is disabled, so the migration already done there keeps the `rename`
+path unchanged.
+
+Earlier versions of this script simply refused to run while `podman-restart.service` was
+enabled. That was safe but it blocked the migration outright; the capture path performs it
+correctly instead.
+
+The capture cannot bring back a container's **writable layer** — anything written inside the
+container that did not land in a volume or a bind mount. Nextcloud keeps its code, config, apps and data in the html and
+data bind mounts, and the live containers' writable layers hold about 13 kB of runtime
+scratch, so nothing of value is lost. (`ql_capture_container --commit` exists for a stack
+that mutates its own container; Nextcloud does not need it.) The container id and the IP/MAC
+lease are not preserved either. `tests/rollback-model.sh` pins both paths.
+
 **After the soak period** (two weeks, including one reboot):
 
 ```bash
+# on the rename path; the capture path removed them at the cutover
 podman rm nextcloud-app-legacy-YYYYMMDD nextcloud-cron-legacy-YYYYMMDD \
           nextcloud-db-legacy-YYYYMMDD nextcloud-redis-legacy-YYYYMMDD
 rm ~/.config/systemd/user/podman-nextcloud.service ~/.local/bin/start-migrated-nextcloud
