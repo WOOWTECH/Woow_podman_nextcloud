@@ -186,6 +186,23 @@ t_migrate_legacy_asks_the_host_instead_of_refusing() {
   return 0
 }
 
+t_the_capture_path_works_with_an_empty_suffix() {
+  # A capture-path cutover renames nothing, so it has no <name>-legacy-<suffix> to name and
+  # passes an empty suffix. `${2:?}` would abort the script there; `${2-}` must not.
+  enable_restart_unit
+  mk_legacy nextcloud-app always
+  expect_ok app_legacy_capture "$T/bk" nextcloud-app
+  expect_ok app_legacy_retire capture "" "$T/bk" nextcloud-app
+  podman container exists nextcloud-app && die_t "nextcloud-app was not removed"
+  expect_ok app_legacy_restore "" "$T/bk" nextcloud-app
+  has "$OUT" "recreated nextcloud-app"
+  eq "$(ql_container_restart_policy nextcloud-app)" always "the original restart policy comes back"
+  # and with no capture either, the refusal names only what could exist
+  expect_fail app_legacy_restore "" "$T/empty" nextcloud-app
+  hasnt "$OUT" "-legacy- " "an empty suffix must not be spelled into the message"
+  return 0
+}
+
 run() {
   local t=$1 log rc
   [[ -z $FILTER || $t == *"$FILTER"* ]] || return 0
