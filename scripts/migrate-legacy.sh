@@ -25,10 +25,19 @@
 #   --no-auto-rollback   leave a failed cutover in place for inspection
 #   --rollback           undo the cutover, including config.php
 #
+# Rollback shape (STANDARD 7a): the legacy containers are kept for --rollback either by
+# renaming them and leaving them stopped, or - where the user unit podman-restart.service is
+# enabled and a legacy container's restart policy is exactly `always`, as the compose-era
+# Nextcloud containers are, because a renamed copy would revive at the next boot and open the
+# same data directories next to the new stack - by capturing them into the backup directory
+# and removing them. ql_rollback_strategy decides from this host's real state, never from its
+# name, and --dry-run reports which path a cutover would take. The capture is taken in step 2,
+# before any downtime. --suffix applies to the rename path only.
+#
 # Steps:  1 pre-flight checks (versions, mounts, the SCRAM check above)
 #         2 backup: maintenance mode, pg_dump, roles, inspect, the legacy .env
 #         3 stop and disable the legacy unit, cold tar of html and PGDATA, save config.php,
-#           rename every legacy container (the cron one too: the timer replaces it)
+#           retire every legacy container (the cron one too: the timer replaces it)
 #         4 scripts/install.sh adopts the four directories
 #         5 wait for status.php, occ status, leave maintenance mode, tests/smoke.sh
 #         6 --rollback when needed
@@ -60,7 +69,7 @@ while (($#)); do
     --rollback) mode=rollback ;;
     --status) mode=status ;;
     --yes) ASSUME_YES=1 ;;
-    -h | --help) sed -n '2,33p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,43p' "$0"; exit 0 ;;
     *) ql_die "unknown option $1 (see --help)" ;;
   esac
   shift
@@ -90,12 +99,12 @@ unit_exists() { [[ -n $(systemctl --user show -p FragmentPath --value "$1" 2>/de
 # 6. rollback
 # =============================================================================================
 rollback() {
-  local status sfx c unit_state saved html
+  local status sfx c unit_state saved html bk
   local -a renamed=()
-  status=$(state_get STATUS) sfx=$(state_get SUFFIX)
+  status=$(state_get STATUS) sfx=$(state_get SUFFIX) bk=$(state_get BACKUP)
   read -ra renamed <<<"$(state_get RENAMED)"
   [[ $status == cutover || $status == "done" ]] || ql_die "nothing to roll back (migration status: ${status:-none})"
-  app_confirm "--rollback removes the Nextcloud Quadlet units and brings back the legacy containers *-legacy-$sfx"
+  app_confirm "--rollback removes the Nextcloud Quadlet units and brings the legacy containers back"
   if app_running "$APP_CONTAINER"; then app_occ maintenance:mode --on >/dev/null 2>&1 || true; fi
   ql_info "stopping and removing the Quadlet units (the data directories are kept)"
   ql_uninstall_units "$APP"
@@ -120,10 +129,9 @@ rollback() {
         || ql_die "container $c exists and is not a Quadlet leftover; resolve it by hand"
       podman rm -f "$c" >/dev/null
     fi
-    podman container exists "$c-legacy-$sfx" || ql_die "legacy container $c-legacy-$sfx is missing"
-    podman rename "$c-legacy-$sfx" "$c"
-    ql_info "renamed $c-legacy-$sfx -> $c"
   done
+  # renamed back, or recreated from the capture the cutover took - whichever the host needed
+  app_legacy_restore "$sfx" "$bk" "${renamed[@]}"
   unit_state=$(state_get LEGACY_UNIT_STATE)
   if unit_exists "$LEGACY_UNIT"; then
     if [[ $unit_state == enabled ]]; then systemctl --user enable "$LEGACY_UNIT" >/dev/null 2>&1; fi
@@ -216,8 +224,6 @@ case $(state_get STATUS) in
   cutover | "done") ql_die "a cutover is already recorded in $STATE (use --status, or --rollback)" ;;
 esac
 if [[ $mode == dry-run ]]; then QL_DRY_RUN=1 ql_enable_linger; else ql_enable_linger; fi
-[[ $(systemctl --user is-enabled podman-restart.service 2>/dev/null || true) != enabled ]] \
-  || ql_die "podman-restart.service is enabled: at boot it would start the renamed legacy containers next to the new ones. Disable it first"
 legacy_containers=()
 for c in "${LEGACY_ALL[@]}"; do
   if podman container exists "$c"; then legacy_containers+=("$c"); fi
@@ -228,9 +234,17 @@ for c in "$APP_CONTAINER" "$DB_CONTAINER" "$REDIS_CONTAINER"; do
   [[ $label != nextcloud-*.service ]] || ql_die "$c is already managed by Quadlet ($label)"
   app_running "$c" || ql_die "legacy container $c is not running; start the legacy stack first"
 done
-for c in "${legacy_containers[@]}"; do
-  if podman container exists "$c-legacy-$suffix"; then ql_die "$c-legacy-$suffix already exists; pick another --suffix"; fi
-done
+# How the legacy containers are kept for --rollback: renamed and left stopped, or captured
+# and removed. Asked of this host, never of its name (STANDARD 7a, quadlet-lib >= 1.4.0).
+# The compose-era Nextcloud containers carry restart=always, so on a host whose
+# podman-restart.service is enabled a renamed copy would revive at boot and a second
+# PostgreSQL and a second Apache would open the same data directories.
+STRATEGY=$(ql_rollback_strategy "${legacy_containers[@]}")
+if [[ $STRATEGY == rename ]]; then
+  for c in "${legacy_containers[@]}"; do
+    if podman container exists "$c-legacy-$suffix"; then ql_die "$c-legacy-$suffix already exists; pick another --suffix"; fi
+  done
+fi
 legacy_html=$(mount_source "$APP_CONTAINER" /var/www/html)
 legacy_data=$(mount_source "$APP_CONTAINER" /var/www/html/data)
 legacy_pgdata=$(mount_source "$DB_CONTAINER" /var/lib/postgresql/data)
@@ -308,7 +322,11 @@ if [[ $mode == dry-run ]]; then
   ql_env_load "$WORK/nextcloud.env"
   app_validate_env
   app_render "$WORK/render" "$WORK/nextcloud.env"
-  ql_info "dry-run: checks passed and the units render. The cutover would stop $LEGACY_UNIT, rename ${legacy_containers[*]} to *-legacy-$suffix and install:"
+  if [[ $STRATEGY == capture ]]; then
+    ql_info "dry-run: checks passed and the units render. The cutover would stop $LEGACY_UNIT, capture ${legacy_containers[*]} into the backup directory and remove them (podman-restart.service would revive a renamed copy here), and install:"
+  else
+    ql_info "dry-run: checks passed and the units render. The cutover would stop $LEGACY_UNIT, rename ${legacy_containers[*]} to *-legacy-$suffix and install:"
+  fi
   sed 's/^/    /' < <(grep -vE '^[[:space:]]*(#|$)' "$WORK/nextcloud.env") >&2
   exit 0
 fi
@@ -369,6 +387,13 @@ state_set SUFFIX "$suffix"
 state_set LEGACY_PORT "$port"
 state_set HTML_DIR "$legacy_html"
 state_set RENAMED "${legacy_containers[*]}"
+# On the capture path the rollback copy is written now, while the legacy stack still runs:
+# a container whose create command cannot be replayed is then refused before any downtime.
+if [[ $STRATEGY == capture ]]; then
+  app_legacy_capture "$bk" "${legacy_containers[@]}"
+  app_write_checksums "$bk"
+fi
+state_set STRATEGY "$STRATEGY"
 if [[ $mode == prepare ]]; then
   ql_info "prepared. Run the cutover (8-12 min of maintenance mode) with the same options minus --prepare-only"
   exit 0
@@ -378,7 +403,7 @@ fi
 # 3. maintenance mode, dump, stop, cold tar, save config.php, rename (downtime starts)
 # =============================================================================================
 app_confirm "the cutover puts Nextcloud into maintenance mode for about 8-12 minutes"
-ql_info "step 3/5: maintenance mode, database dump, stop, cold copies, renaming"
+ql_info "step 3/5: maintenance mode, database dump, stop, cold copies, retiring the legacy containers ($STRATEGY)"
 state_set STATUS cutover
 app_maintenance on
 app_dump_db "$bk/nextcloud.pgdump"
@@ -405,10 +430,7 @@ ql_backup_dir "$legacy_pgdata" "$bk/postgres-dir.tgz" >/dev/null
 (umask 077 && podman unshare cat -- "$legacy_html/config/config.php" >"$bk/config.php.pre-quadlet") \
   || ql_die "cannot copy config.php"
 state_set CONFIG_PHP "$bk/config.php.pre-quadlet"
-for c in "${legacy_containers[@]}"; do
-  podman rename "$c" "$c-legacy-$suffix"
-  ql_info "renamed $c -> $c-legacy-$suffix (kept for --rollback)"
-done
+app_legacy_retire "$STRATEGY" "$suffix" "$bk" "${legacy_containers[@]}"
 app_write_checksums "$bk"
 
 # =============================================================================================
@@ -445,6 +467,10 @@ fi
 state_set STATUS "done"
 ql_info "migration complete. Compare with $bk/precheck.txt (users, oc_filecache, apps, extensions)."
 ql_info "the database and Redis are no longer on the host loopback; verify with: ss -ltnH '( sport = :5432 or sport = :6379 )'"
-ql_info "legacy containers *-legacy-$suffix and $LEGACY_UNIT (disabled) are kept for rollback:"
+if [[ $STRATEGY == capture ]]; then
+  ql_info "the legacy containers were captured into $bk/legacy-container and removed (podman-restart.service is enabled here, so a renamed copy would have revived at boot); $LEGACY_UNIT is disabled. Roll back with:"
+else
+  ql_info "legacy containers *-legacy-$suffix and $LEGACY_UNIT (disabled) are kept for rollback:"
+fi
 ql_info "  $0 --rollback"
 ql_info "after the soak period, clean up as described in README ('After the soak')"
