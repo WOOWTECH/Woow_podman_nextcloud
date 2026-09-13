@@ -1,187 +1,106 @@
-# Nextcloud Docker/Podman Deployment Skill
+# Skill: Deploy Nextcloud + PostgreSQL (rootless Podman Quadlet)
 
-## Skill Metadata
+## Metadata
 
-- **Name:** nextcloud-docker-deployment
-- **Description:** Deploy Nextcloud with PostgreSQL (pgvector) using Docker/Podman Compose
-- **Trigger:** User asks to deploy Nextcloud, set up a self-hosted cloud storage, or deploy this repository
-- **Repository:** https://github.com/WOOWTECH/Woow_podman_nextcloud
+- **Name**: deploy-nextcloud-postgres
+- **Description**: Deploy Nextcloud with PostgreSQL 16 (pgvector) and Redis as rootless
+  Podman Quadlet units managed by the user's systemd
+- **Trigger**: the user asks to deploy Nextcloud, set up self-hosted file storage, or migrate
+  an existing Nextcloud compose / manual deployment
+- **Repository**: https://github.com/WOOWTECH/Woow_podman_nextcloud
 
----
+## Prerequisites
 
-## Overview
+- Ubuntu 24.04 or similar, rootless podman >= 4.9.3, systemd 255 user units
+- linger enabled for the service user: `sudo loginctl enable-linger $USER`
+- `HOST_POSTGRES_DIR` on a local filesystem — never NFS or SMB
+- Never run these scripts as root or through `sudo`: the containers belong to the user.
 
-This skill guides an AI assistant through deploying a production-ready Nextcloud instance with PostgreSQL 16 (pgvector), Redis caching, and automated cron jobs using Docker or Podman Compose.
-
-## Stack Components
-
-| Component | Image | Purpose |
-|-----------|-------|---------|
-| Nextcloud | `nextcloud:stable` | Cloud storage application (port 18080) |
-| PostgreSQL | `pgvector/pgvector:pg16` | Database with vector extension for AI features |
-| Redis | `redis:alpine` | Caching and file locking |
-| Cron | `nextcloud:stable` | Background job processing |
-
-## Deployment Checklist
-
-### Pre-Deployment
-
-- [ ] Verify Docker/Podman is installed: `docker --version` or `podman --version`
-- [ ] Verify compose is available: `docker compose version` or `podman-compose --version`
-- [ ] Confirm minimum 4 GB RAM available
-- [ ] Confirm sufficient disk space (20+ GB)
-
-### Deployment Steps
+## Fresh install
 
 ```bash
-# 1. Clone repository
-git clone https://github.com/WOOWTECH/Woow_podman_nextcloud.git
-cd Woow_podman_nextcloud
-
-# 2. Create and configure .env
-cp .env.example .env
-# Edit .env: set POSTGRES_PASSWORD, NEXTCLOUD_ADMIN_PASSWORD, NEXTCLOUD_TRUSTED_DOMAINS
-
-# 3. Create data directories
-mkdir -p data/{nextcloud/html,nextcloud/data,postgres,redis}
-
-# 4. Start services
-docker compose up -d          # Docker
-# OR
-podman-compose up -d          # Podman
-
-# 5. Wait for healthy status
-docker compose ps
-
-# 6. Enable pgvector
-docker exec -it nextcloud-db psql -U nextcloud -d nextcloud \
-  -c "CREATE EXTENSION IF NOT EXISTS vector;"
-
-# 7. Verify access
-curl -I http://localhost:18080
+git clone https://github.com/WOOWTECH/Woow_podman_nextcloud ~/woow-quadlet/Woow_podman_nextcloud
+cd ~/woow-quadlet/Woow_podman_nextcloud
+tests/dryrun.sh                              # validates the units, creates nothing
+scripts/install.sh                           # creates ~/.config/nextcloud/nextcloud.env, then stops
+# edit HOST_BIND, HOST_PORT, the four HOST_*_DIR paths and NEXTCLOUD_TRUSTED_DOMAINS
+scripts/install.sh                           # installs, starts, runs tests/smoke.sh
+podman secret inspect --showsecret nextcloud-admin-password
 ```
 
-### Post-Deployment
+`install.sh` is idempotent: run it again after any change to the repo or the env file. It
+restarts only the units whose file or environment changed. On a fresh install it also sets the
+cron background-job mode, creates the `vector` extension and adds the missing indices.
 
-- [ ] Access Nextcloud at http://\<server-ip\>:18080
-- [ ] Set background jobs to "Cron" in Settings > Basic settings
-- [ ] Install Recognize app for AI photo tagging (optional)
-- [ ] Configure Cloudflare Tunnel for external access (optional)
-- [ ] Set up automated backups with `./scripts/backup.sh`
+**Trusted domains:** every name or address the instance is reached by must be in
+`NEXTCLOUD_TRUSTED_DOMAINS` before the first start, or Nextcloud answers "access through
+untrusted domain".
 
-## Environment Variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `POSTGRES_PASSWORD` | **Yes** | - | Database password (must be strong) |
-| `NEXTCLOUD_ADMIN_PASSWORD` | **Yes** | - | Admin password (must be strong) |
-| `POSTGRES_DB` | No | `nextcloud` | Database name |
-| `POSTGRES_USER` | No | `nextcloud` | Database username |
-| `NEXTCLOUD_ADMIN_USER` | No | `admin` | Admin username |
-| `NEXTCLOUD_TRUSTED_DOMAINS` | No | `localhost` | Space-separated trusted domains |
-| `NEXTCLOUD_PORT` | No | `18080` | Host port |
-| `OVERWRITEPROTOCOL` | No | `https` | URL protocol |
-| `OVERWRITECLIURL` | No | - | Full CLI URL |
-| `TRUSTED_PROXIES` | No | - | Proxy CIDR ranges |
-
-## Password Generation
+## Verify
 
 ```bash
-# Generate secure passwords
-openssl rand -base64 24
-# Or
-python3 -c "import secrets; print(secrets.token_urlsafe(24))"
+tests/smoke.sh                               # units, healthchecks, status.php, occ, cron, listeners
+curl -fsS http://127.0.0.1:18080/status.php  # installed:true, maintenance:false
+systemctl --user list-timers nextcloud-cron.timer
 ```
 
-## Common Operations
-
-### Backup
+## Migrate an existing compose or manual deployment
 
 ```bash
-./scripts/backup.sh
-# Creates: backups/nextcloud_backup_YYYYMMDD_HHMMSS.tar.gz
+scripts/migrate-legacy.sh --legacy-dir <old checkout with .env> --dry-run
+scripts/migrate-legacy.sh --legacy-dir <old checkout> --bind 0.0.0.0 --prepare-only
+scripts/migrate-legacy.sh --legacy-dir <old checkout> --bind 0.0.0.0 --yes
+scripts/migrate-legacy.sh --rollback --yes   # if anything is wrong
 ```
 
-### Restore
+The html, data, PostgreSQL and Redis directories are adopted where they are — read out of
+`podman inspect`, never guessed or copied. The legacy containers are renamed
+`<name>-legacy-YYYYMMDD` and `podman-nextcloud.service` is disabled but kept, which is what
+makes the rollback fast.
 
-```bash
-./scripts/restore.sh backups/nextcloud_backup_YYYYMMDD_HHMMSS.tar.gz
-```
+**Always run the dry-run first.** On a host-network deployment PostgreSQL trusted
+`127.0.0.1`, so `config.php`'s password for `oc_admin` has never been verified; the dry-run
+checks it against the SCRAM verifier and `--fix-db-password` repairs it before the window.
 
-### Upgrade
+## Day-2 operations
 
-```bash
-./scripts/backup.sh                    # Backup first
-docker compose pull                    # Pull latest images
-docker compose up -d                   # Recreate containers
-docker exec -u www-data nextcloud-app php occ status  # Verify
-```
+| Task | Command |
+|---|---|
+| occ | `podman exec -u www-data nextcloud-app php /var/www/html/occ <cmd>` |
+| logs | `journalctl --user -u nextcloud-app.service -f` |
+| restart the stack | `systemctl --user restart nextcloud.target` |
+| run cron.php now | `systemctl --user start nextcloud-cron.service` |
+| upgrade | bump `Image=` in `quadlet/nextcloud-app.container`, `git pull`, `scripts/upgrade.sh` |
+| backup | `scripts/backup.sh` (add `--cold` for a byte copy of html and PGDATA) |
+| restore | `scripts/restore.sh ~/backups/nextcloud/<timestamp>` |
+| uninstall | `scripts/uninstall.sh` (`--purge --yes` also deletes the network and secrets) |
 
-### Useful occ Commands
-
-```bash
-# File scan
-docker exec -u www-data nextcloud-app php occ files:scan --all
-
-# Update apps
-docker exec -u www-data nextcloud-app php occ app:update --all
-
-# Reset admin password
-docker exec -u www-data nextcloud-app php occ user:resetpassword admin
-
-# Check status
-docker exec -u www-data nextcloud-app php occ status
-
-# Add missing DB indices
-docker exec -u www-data nextcloud-app php occ db:add-missing-indices
-
-# Add trusted domain
-docker exec -u www-data nextcloud-app php occ config:system:set \
-  trusted_domains 1 --value=your-domain.com
-```
-
-## Troubleshooting
-
-| Issue | Diagnosis | Solution |
-|-------|-----------|----------|
-| DB connection error | `docker exec nextcloud-db pg_isready -U nextcloud` | Check `.env` passwords match, check `docker compose logs db` |
-| Permission denied | Files owned by wrong user | `docker exec nextcloud-app chown -R www-data:www-data /var/www/html/data` |
-| Untrusted domain | Accessing from IP/domain not in config | Add domain to `NEXTCLOUD_TRUSTED_DOMAINS` in `.env`, restart |
-| Redis not connecting | `docker exec nextcloud-redis redis-cli ping` | Check `docker compose logs redis` |
-| 502 Bad Gateway | Nextcloud container not ready | Wait for initialization, check `docker compose logs nextcloud` |
-
-## Architecture Diagram
+## Architecture
 
 ```
-Internet → Cloudflare Tunnel (SSL) → Host:18080
-                                        │
-                                  nextcloud-app
-                                   (Apache+PHP)
-                                        │
-                    ┌───────────────────┼───────────────────┐
-                    ▼                   ▼                   ▼
-              nextcloud-db        nextcloud-redis      nextcloud-cron
-           (PostgreSQL 16         (Cache/Lock)        (Background Jobs)
-            + pgvector)
+nextcloud.target
+├── nextcloud-db.service     docker.io/pgvector/pgvector:0.8.6-pg16   HOST_POSTGRES_DIR
+├── nextcloud-redis.service  docker.io/library/redis:8.10.1-alpine    HOST_REDIS_DIR
+├── nextcloud-app.service    docker.io/library/nextcloud:34.0.3-apache
+│                            HOST_HTML_DIR -> /var/www/html, HOST_DATA_DIR -> .../data
+│                            PublishPort HOST_BIND:HOST_PORT -> 80
+└── nextcloud-cron.timer -> nextcloud-cron.service (podman exec ... cron.php, every 5 min)
+network nextcloud-network · secrets nextcloud-db-password, nextcloud-admin-password
 ```
 
-## Network
+## Rules for an agent working on this repo
 
-All services communicate on `nextcloud-network` (bridge). Only the Nextcloud app container exposes port 18080 to the host.
-
-## Data Persistence
-
-| Path | Container Mount | Content |
-|------|-----------------|---------|
-| `data/postgres/` | `/var/lib/postgresql/data` | Database files |
-| `data/redis/` | `/data` | Redis AOF persistence |
-| `data/nextcloud/html/` | `/var/www/html` | Nextcloud application |
-| `data/nextcloud/data/` | `/var/www/html/data` | User files |
-
-## Security Notes
-
-- `.env` file is git-ignored (contains secrets)
-- Use strong, unique passwords (minimum 16 characters recommended)
-- Enable 2FA for admin accounts after deployment
-- Keep all images updated regularly
-- Review Nextcloud security warnings in Settings > Overview
+1. The repo is the source of truth for versions. Never edit a unit file on the host; change
+   `quadlet/*` here and run `scripts/install.sh`.
+2. **One Nextcloud major version at a time**, and never pin `nextcloud:stable` — the tag moves,
+   and a container that starts on a newer release than the data expects refuses to run.
+3. `occ` and `cron.php` always run as `www-data`. Never hide a failed
+   `occ maintenance:mode --on` behind `|| true`; that is how backups were taken of a live
+   instance before.
+4. Never put a password into `~/.config/nextcloud/nextcloud.env` or a unit: use podman secrets.
+   Never add a key starting with `NC_` to the env file — Nextcloud reads it as a `config.php`
+   override.
+5. Never delete a data directory to "clean up". `uninstall.sh --purge` exists, it backs the
+   secrets up first, and it deliberately refuses to remove the bind-mounted directories.
+6. `scripts/lib/quadlet-lib.sh` is vendored and verified by CI; upstream changes to it belong
+   in Woow_quadlet_migration_plan/lib, not here.

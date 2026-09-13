@@ -1,110 +1,77 @@
-#!/bin/bash
-# ===========================================
-# Nextcloud Restore Script
-# Nextcloud 還原腳本
-# ===========================================
-# Usage: ./scripts/restore.sh <backup_file.tar.gz>
-# 用法: ./scripts/restore.sh <備份檔案.tar.gz>
-# ===========================================
+#!/usr/bin/env bash
+# scripts/restore.sh: put a scripts/backup.sh backup back into the installed stack.
+#
+#   scripts/restore.sh <backup-dir> [--with-html] [--yes]
+#
+# 1. verifies SHA256SUMS
+# 2. stops the cron timer and the app (PostgreSQL keeps running)
+# 3. restores the secrets and the roles, then the database (pg_restore --clean --create):
+#    the role password hashes and the secrets travel together, so config.php's oc_admin
+#    password still authenticates afterwards
+# 4. restores config.tgz (and data.tgz when it is in the backup); --with-html also replaces
+#    the whole html directory from a --cold backup, which is what a version rollback needs
+# 5. starts the app, refreshes the data fingerprint, leaves maintenance mode and smokes
+#
+# Unlike the old scripts/restore.sh this never calls `podman stop` behind systemd's back,
+# and it does not chown anything: the archives carry the numeric owners.
+# shellcheck source-path=SCRIPTDIR
+set -euo pipefail
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+# shellcheck source=lib/quadlet-lib.sh
+. "$REPO/scripts/lib/quadlet-lib.sh"
+# shellcheck source=app.sh
+. "$REPO/scripts/app.sh"
 
-set -e
+src='' with_html=0 ASSUME_YES=0
+while (($#)); do
+  case $1 in
+    --with-html) with_html=1 ;;
+    --yes) ASSUME_YES=1 ;;
+    -h | --help) sed -n '2,18p' "$0"; exit 0 ;;
+    -*) ql_die "unknown option $1 (see --help)" ;;
+    *) [[ -z $src ]] || ql_die "one backup directory only"; src=$1 ;;
+  esac
+  shift
+done
+[[ -n $src ]] || ql_die "usage: scripts/restore.sh <backup-dir> [--with-html] [--yes]"
+src=$(cd -- "$src" && pwd -P) || ql_die "no such directory: $src"
+ql_require_rootless
+[[ ${WOOW_QL_LOCK_HELD:-} == "$APP" ]] || ql_lock "$APP"
+app_require_installed
+ql_env_load "$ENV_FILE"
+html_dir=$(app_dir HOST_HTML_DIR)
+data_dir=$(app_dir HOST_DATA_DIR)
 
-# Check argument
-if [ -z "$1" ]; then
-    echo "Usage: $0 <backup_file.tar.gz>"
-    echo "用法: $0 <備份檔案.tar.gz>"
-    exit 1
+[[ -f $src/SHA256SUMS ]] || ql_die "$src/SHA256SUMS is missing: not a scripts/backup.sh backup"
+(cd -- "$src" && sha256sum -c --quiet SHA256SUMS) || ql_die "checksum mismatch in $src"
+[[ -f $src/nextcloud.pgdump ]] || ql_die "$src/nextcloud.pgdump is missing"
+((!with_html)) || [[ -f $src/html.tgz ]] || ql_die "--with-html needs html.tgz (a --cold backup)"
+app_confirm "restore replaces the Nextcloud database and configuration with $src"
+
+ts=$(date +%Y%m%d-%H%M%S)
+ql_info "stopping the cron timer and the app (PostgreSQL keeps running)"
+systemctl --user stop nextcloud-cron.timer nextcloud-app.service
+systemctl --user start nextcloud-db.service
+QL_HEALTH_ACTIVE=1 ql_wait_container_healthy "$DB_CONTAINER" 300 || ql_die "$DB_CONTAINER is not healthy"
+
+for f in "$src"/secrets/*; do
+  [[ -f $f ]] || continue
+  ql_secret_ensure "${f##*/}" "file:$f" --update
+done
+[[ ! -f $src/roles.sql ]] || app_restore_roles "$src/roles.sql"
+app_restore_db "$src/nextcloud.pgdump"
+
+if ((with_html)); then
+  app_replace_dir "$html_dir" "$src/html.tgz" "pre-restore-$ts"
 fi
+[[ ! -f $src/config.tgz ]] || app_replace_dir "$html_dir/config" "$src/config.tgz" "pre-restore-$ts"
+[[ ! -f $src/data.tgz ]] || app_replace_dir "$data_dir" "$src/data.tgz" "pre-restore-$ts"
 
-BACKUP_FILE="$1"
-
-if [ ! -f "$BACKUP_FILE" ]; then
-    echo "Error: Backup file not found / 錯誤：找不到備份檔案: $BACKUP_FILE"
-    exit 1
-fi
-
-# Configuration
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-TEMP_DIR=$(mktemp -d)
-
-# Load environment variables
-if [ -f "$PROJECT_DIR/.env" ]; then
-    source "$PROJECT_DIR/.env"
-else
-    echo "Error: .env file not found / 錯誤：找不到 .env 檔案"
-    exit 1
-fi
-
-echo "=========================================="
-echo "Starting Nextcloud Restore / 開始 Nextcloud 還原"
-echo "Backup file: $BACKUP_FILE"
-echo "=========================================="
-
-# Confirm
-read -p "This will overwrite existing data. Continue? (y/N) / 這將覆蓋現有資料。繼續？(y/N) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Aborted / 已取消"
-    exit 1
-fi
-
-# Extract backup
-echo "[1/6] Extracting backup / 解壓縮備份..."
-tar -xzf "$BACKUP_FILE" -C "$TEMP_DIR"
-
-# Find extracted files
-DB_DUMP=$(find "$TEMP_DIR" -name "*_db.sql" | head -1)
-DATA_ARCHIVE=$(find "$TEMP_DIR" -name "*_data.tar.gz" | head -1)
-CONFIG_ARCHIVE=$(find "$TEMP_DIR" -name "*_config.tar.gz" | head -1)
-
-if [ -z "$DB_DUMP" ] || [ -z "$DATA_ARCHIVE" ] || [ -z "$CONFIG_ARCHIVE" ]; then
-    echo "Error: Invalid backup file / 錯誤：無效的備份檔案"
-    rm -rf "$TEMP_DIR"
-    exit 1
-fi
-
-# Enable maintenance mode
-echo "[2/6] Enabling maintenance mode / 啟用維護模式..."
-podman exec nextcloud-app php occ maintenance:mode --on || true
-
-# Stop nextcloud and cron
-echo "[3/6] Stopping services / 停止服務..."
-podman stop nextcloud-app nextcloud-cron || true
-
-# Restore database
-echo "[4/6] Restoring PostgreSQL / 還原 PostgreSQL..."
-podman exec -i nextcloud-db psql -U "${POSTGRES_USER:-nextcloud}" -d postgres -c "DROP DATABASE IF EXISTS ${POSTGRES_DB:-nextcloud};"
-podman exec -i nextcloud-db psql -U "${POSTGRES_USER:-nextcloud}" -d postgres -c "CREATE DATABASE ${POSTGRES_DB:-nextcloud};"
-cat "$DB_DUMP" | podman exec -i nextcloud-db psql -U "${POSTGRES_USER:-nextcloud}" -d "${POSTGRES_DB:-nextcloud}"
-
-# Restore data
-echo "[5/6] Restoring Nextcloud data / 還原 Nextcloud 資料..."
-rm -rf "$PROJECT_DIR/data/nextcloud/data"
-tar -xzf "$DATA_ARCHIVE" -C "$PROJECT_DIR/data/nextcloud"
-
-# Restore config
-tar -xzf "$CONFIG_ARCHIVE" -C "$PROJECT_DIR/data/nextcloud/html"
-
-# Restart services
-echo "[6/6] Restarting services / 重新啟動服務..."
-podman start nextcloud-app nextcloud-cron
-
-# Wait for startup
-sleep 10
-
-# Disable maintenance mode
-podman exec nextcloud-app php occ maintenance:mode --off || true
-
-# Fix permissions
-podman exec nextcloud-app chown -R www-data:www-data /var/www/html/data
-podman exec nextcloud-app chown -R www-data:www-data /var/www/html/config
-
-# Cleanup
-rm -rf "$TEMP_DIR"
-
-echo "=========================================="
-echo "Restore completed / 還原完成"
-echo "Please verify your Nextcloud instance"
-echo "請驗證您的 Nextcloud 實例"
-echo "=========================================="
+mapfile -t units < <(app_units)
+systemctl --user start "${units[@]}"
+app_wait_status 900 || ql_die "Nextcloud did not come back; see: journalctl --user -u nextcloud-app.service -n 100"
+app_occ maintenance:data-fingerprint >/dev/null || ql_warn "occ maintenance:data-fingerprint failed"
+app_occ maintenance:mode --off >/dev/null || ql_warn "could not leave maintenance mode"
+"$REPO/tests/smoke.sh" --timeout 900 || ql_die "restored, but the smoke test failed"
+ql_info "restore of $src complete"
+ql_info "the replaced directories are kept as *.pre-restore-$ts; remove them with podman unshare rm -rf when you are satisfied"

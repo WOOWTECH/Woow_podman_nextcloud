@@ -1,0 +1,45 @@
+# nextcloud-db.container: PostgreSQL 16 with pgvector (the Recognize app and other AI
+# features use it).
+#
+# The data directory comes from HOST_POSTGRES_DIR in ~/.config/nextcloud/nextcloud.env and
+# is rendered in at install time (decision D2). It must be on a local filesystem.
+# The password is the podman secret nextcloud-db-password; initdb reads it only on an empty
+# directory, so an adopted cluster keeps the password it already has.
+#
+# Postgres listens on every address inside its own network namespace (postgresql.conf
+# listen_addresses='*'); the legacy deployment's "-c listen_addresses=127.0.0.1" is gone
+# because 127.0.0.1 used to mean the HOST's loopback.
+[Unit]
+Description=Nextcloud PostgreSQL
+Documentation=https://github.com/WOOWTECH/Woow_podman_nextcloud
+PartOf=nextcloud.target
+
+[Container]
+ContainerName=nextcloud-db
+Image=docker.io/pgvector/pgvector:0.8.6-pg16
+Network=nextcloud.network
+Volume=@@HOST_POSTGRES_DIR@@:/var/lib/postgresql/data
+Environment=POSTGRES_USER=nextcloud
+Environment=POSTGRES_DB=nextcloud
+Secret=nextcloud-db-password,type=env,target=POSTGRES_PASSWORD
+Label=io.woowtech.app=nextcloud
+LogDriver=journald
+HealthCmd=pg_isready -U nextcloud -d nextcloud
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=5
+HealthStartPeriod=60s
+# Quadlet 4.9.3 has no StopTimeout= key; the generated ExecStop (podman rm -f) honours this.
+PodmanArgs=--stop-timeout=60
+
+[Service]
+# A container stopped by systemd is stopped with SIGTERM: an entrypoint that does not
+# trap it exits 143 (128+15), which would leave the unit failed after a clean stop.
+SuccessExitStatus=143
+Restart=always
+RestartSec=10
+TimeoutStartSec=900
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target

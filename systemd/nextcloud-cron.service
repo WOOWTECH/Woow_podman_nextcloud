@@ -1,0 +1,18 @@
+# nextcloud-cron.service: one run of the Nextcloud background jobs (cron.php).
+# Replaces the old nextcloud-cron container (busybox crond running */5 as www-data).
+# Started by nextcloud-cron.timer.
+#
+# ExecCondition: while nextcloud-app is down the run is SKIPPED, not failed. With Quadlet's
+# --rm the container only exists while its unit runs, so this is an exact "is it up?" test.
+# cron.php exits by itself when the instance is in maintenance mode.
+[Unit]
+Description=Nextcloud background jobs (cron.php)
+Documentation=https://docs.nextcloud.com/server/latest/admin_manual/configuration_server/background_jobs_configuration.html
+After=nextcloud-app.service
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/podman container exists nextcloud-app
+ExecStart=/usr/bin/podman exec -u www-data nextcloud-app php -f /var/www/html/cron.php
+# Type=oneshot plus a timer never overlaps runs; this only bounds a stuck one.
+TimeoutStartSec=30min

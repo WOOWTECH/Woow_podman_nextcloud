@@ -1,0 +1,10 @@
+# nextcloud.target: one handle for the whole stack.
+#   systemctl --user start|stop|restart nextcloud.target
+# Every container unit has PartOf=nextcloud.target, so stop and restart propagate.
+[Unit]
+Description=Nextcloud stack
+Documentation=https://github.com/WOOWTECH/Woow_podman_nextcloud
+Wants=nextcloud-db.service nextcloud-redis.service nextcloud-app.service nextcloud-cron.timer
+
+[Install]
+WantedBy=default.target

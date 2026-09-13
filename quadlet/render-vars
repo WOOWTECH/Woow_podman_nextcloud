@@ -1,0 +1,9 @@
+# Variables that scripts/install.sh may substitute as tokens in quadlet/ and systemd/
+# (decision D2). Values come from ~/.config/nextcloud/nextcloud.env. Anything not listed
+# here is a hard render error.
+HOST_BIND
+HOST_PORT
+HOST_HTML_DIR
+HOST_DATA_DIR
+HOST_POSTGRES_DIR
+HOST_REDIS_DIR
