@@ -119,7 +119,7 @@ fi
 # rollback_incomplete: say so if this script ends before the rollback below finishes.
 # A hook, not `trap ... EXIT`: a bare trap would replace the handler ql_lock armed and
 # leave the lock directory behind, so every later run would report a takeover.
-# shellcheck disable=SC2329 # invoked indirectly, as the ql_cleanup hook registered below
+# shellcheck disable=SC2317,SC2329 # invoked indirectly, as the ql_cleanup hook registered below
 rollback_incomplete() {
   local rc=$?
   ((rc == 0)) || ql_warn "ROLLBACK INCOMPLETE (rc=$rc). Backup: $bk. Restore by hand: scripts/restore.sh $bk --with-html"
