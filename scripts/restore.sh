@@ -36,7 +36,7 @@ done
 [[ -n $src ]] || ql_die "usage: scripts/restore.sh <backup-dir> [--with-html] [--yes]"
 src=$(cd -- "$src" && pwd -P) || ql_die "no such directory: $src"
 ql_require_rootless
-[[ ${WOOW_QL_LOCK_HELD:-} == "$APP" ]] || ql_lock "$APP"
+ql_lock "$APP"
 app_require_installed
 ql_env_load "$ENV_FILE"
 html_dir=$(app_dir HOST_HTML_DIR)

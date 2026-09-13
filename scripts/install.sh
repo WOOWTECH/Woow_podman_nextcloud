@@ -43,8 +43,7 @@ dry=${QL_DRY_RUN:-0}
 # ---- 1. host preflight ----------------------------------------------------------------------
 ql_preflight "$PODMAN_MIN"
 ql_enable_linger
-# upgrade.sh and migrate-legacy.sh hold the lock already and call this script.
-[[ ${WOOW_QL_LOCK_HELD:-} == "$APP" ]] || ql_lock "$APP"
+ql_lock "$APP"
 
 # ---- 2. per-host settings (D2: values come from the env file, never from the repo) ---------
 ql_env_ensure "$ENV_EXAMPLE" "$ENV_FILE"
@@ -75,7 +74,7 @@ for k in "${DATA_DIR_KEYS[@]}"; do ql_check_path_mounted "$(app_dir "$k")" "${co
 
 # ---- 4. stage, render, validate -----------------------------------------------------------
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/$APP-install.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+ql_cleanup work rm -rf "$WORK"
 app_render "$WORK" "$render_env"
 for f in "$WORK/out"/*; do
   u=$(ql_unit_for "$f")
