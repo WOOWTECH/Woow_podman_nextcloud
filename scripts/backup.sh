@@ -37,7 +37,7 @@ while (($#)); do
   shift
 done
 ql_require_rootless
-[[ ${WOOW_QL_LOCK_HELD:-} == "$APP" ]] || ql_lock "$APP"
+ql_lock "$APP"
 ql_env_load "$ENV_FILE"
 app_running "$APP_CONTAINER" || ql_die "$APP_CONTAINER is not running (start it: systemctl --user start $TARGET)"
 app_running "$DB_CONTAINER" || ql_die "$DB_CONTAINER is not running"
@@ -62,7 +62,8 @@ finish() {
   fi
   return $rc
 }
-trap finish EXIT
+# a hook, not `trap ... EXIT`, which would replace the handler ql_lock armed
+ql_cleanup finish finish
 
 app_maintenance on
 maint=1
@@ -100,7 +101,7 @@ if ((cold)); then
 fi
 
 app_write_checksums "$dest"
-trap - EXIT
+ql_cleanup_clear finish
 finish
 ql_info "backup complete: $dest ($(du -sh -- "$dest" | cut -f1))"
 printf '%s\n' "$dest"
