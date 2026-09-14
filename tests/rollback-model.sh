@@ -197,10 +197,102 @@ t_the_capture_path_works_with_an_empty_suffix() {
   expect_ok app_legacy_restore "" "$T/bk" nextcloud-app
   has "$OUT" "recreated nextcloud-app"
   eq "$(ql_container_restart_policy nextcloud-app)" always "the original restart policy comes back"
-  # and with no capture either, the refusal names only what could exist
+  # and with no capture either, the refusal names only what could exist - once the
+  # container is genuinely gone again (an already-existing $c is now "nothing to restore",
+  # see t_legacy_restore_resumes_when_retirement_stopped_partway, so remove it first here)
+  podman rm nextcloud-app >/dev/null
   expect_fail app_legacy_restore "" "$T/empty" nextcloud-app
   hasnt "$OUT" "-legacy- " "an empty suffix must not be spelled into the message"
   return 0
+}
+
+# ---- dependency ordering: a --requires edge between legacy containers -------------------
+# Confirmed live on woowtechopenclaw: the legacy nextcloud-cron sidecar was created with
+# --requires=nextcloud-app (podman-compose style), and app_legacy_retire's capture path
+# removed the legacy containers in LEGACY_ALL's fixed order (app, cron, db, redis) - so
+# `podman rm nextcloud-app` ran first and failed with "has dependent containers ... must be
+# removed before it: nextcloud-cron", aborting the cutover mid-flight (after maintenance mode
+# was already on and the pg_dump/cold-archive had completed). tests/shims/podman's `create`
+# and `rm` now model --requires and refuse exactly that, on purpose, so this pins the fix
+# (app_rm_ordered in scripts/app.sh) rather than the shim being unable to reproduce the bug.
+mk_requires() { printf '%s\n' "${@:2}" >"$SHIM_STATE/containers/$1/requires"; }
+
+t_retire_removes_a_dependent_container_before_the_one_it_requires() {
+  enable_restart_unit
+  mk_legacy nextcloud-app always
+  mk_legacy nextcloud-cron always
+  mk_legacy nextcloud-db always
+  mk_legacy nextcloud-redis always
+  # The real shape, confirmed read-only on woowtechopenclaw (`podman inspect nextcloud-cron
+  # --format '{{json .Config.CreateCommand}}'`): the compose-era nextcloud-cron requires ALL
+  # THREE other legacy containers, not just nextcloud-app - so a fix that only special-cased
+  # "cron before app" would still have failed removing nextcloud-db or nextcloud-redis before
+  # nextcloud-cron. app_rm_ordered's retry-on-podman's-own-answer approach needs no edge list.
+  mk_requires nextcloud-cron nextcloud-app nextcloud-db nextcloud-redis
+  expect_ok app_legacy_capture "$T/bk" nextcloud-app nextcloud-cron nextcloud-db nextcloud-redis
+  # LEGACY_ALL's real order (nextcloud-app scripts/app.sh): app before its own dependent -
+  # exactly the order that failed live, now handled instead of hard-coded around.
+  expect_ok app_legacy_retire capture 20260914 "$T/bk" nextcloud-app nextcloud-cron nextcloud-db nextcloud-redis
+  for c in nextcloud-app nextcloud-cron nextcloud-db nextcloud-redis; do
+    podman container exists "$c" && die_t "$c was not removed"
+  done
+  calls_log=$(calls)
+  # The first `podman rm` of app/db/redis is expected to fail (nextcloud-cron still requires
+  # each of them) and app_rm_ordered retries them, so the LAST occurrence of each is the one
+  # that stuck.
+  cron_at=$(grep -n '^podman rm nextcloud-cron$' <<<"$calls_log" | tail -n1 | cut -d: -f1)
+  for dep in nextcloud-app nextcloud-db nextcloud-redis; do
+    dep_at=$(grep -n "^podman rm $dep\$" <<<"$calls_log" | tail -n1 | cut -d: -f1)
+    [[ -n $cron_at && -n $dep_at ]] || die_t "expected both rm calls to have run ($dep)"
+    ((cron_at < dep_at)) || die_t "nextcloud-cron (the dependent) must be removed before $dep (which it requires); calls:"$'\n'"$calls_log"
+  done
+}
+
+t_retire_still_dies_on_an_unresolvable_dependency() {
+  # A container the shim never lets succeed (SHIM_CREATE_RC unrelated; here the dependent is
+  # simply never in the list app_legacy_retire was given) must not spin forever or silently
+  # skip - it dies, naming what could not be removed.
+  enable_restart_unit
+  mk_legacy nextcloud-app always
+  mk_legacy nextcloud-cron always
+  mk_requires nextcloud-cron nextcloud-app
+  expect_ok app_legacy_capture "$T/bk" nextcloud-app
+  # nextcloud-cron is deliberately left out of the retire call: app can never be removed.
+  expect_fail app_legacy_retire capture 20260914 "$T/bk" nextcloud-app
+  has "$OUT" "cannot remove nextcloud-app"
+}
+
+# ---- --rollback resuming a cutover that app_legacy_retire stopped partway through ---------
+# Before the fix, migrate-legacy.sh's rollback() refused outright the moment it found a
+# container still sitting under its own name that was not a Quadlet leftover ("resolve it by
+# hand"), and app_legacy_restore tried to recreate a container that was never actually
+# removed (podman create: name already in use). Both must instead resume cleanly: an
+# already-there container (stopped - the cutover always stops legacy containers before
+# retiring them) is nothing to restore, not an error.
+t_legacy_restore_resumes_when_retirement_stopped_partway() {
+  enable_restart_unit
+  mk_legacy nextcloud-app always
+  mk_legacy nextcloud-db always
+  expect_ok app_legacy_capture "$T/bk" nextcloud-app nextcloud-db
+  # Simulate app_legacy_retire dying after removing nextcloud-app but before it ever got to
+  # nextcloud-db (a signal, a disk error - anything that stops the loop midway; the
+  # dependency-order case above is one concrete cause, not the only one). nextcloud-db is
+  # left exactly as mk_legacy made it: present, stopped, under its own name.
+  podman rm nextcloud-app >/dev/null
+  expect_ok app_legacy_restore "" "$T/bk" nextcloud-app nextcloud-db
+  has "$OUT" "recreated nextcloud-app"
+  has "$OUT" "nextcloud-db already exists under its own name"
+  podman container exists nextcloud-app || die_t "nextcloud-app was not recreated"
+  podman container exists nextcloud-db || die_t "nextcloud-db should have been left alone"
+  eq "$(ncalls 'podman create')" 1 "only the actually-missing container is recreated"
+}
+
+t_migrate_legacy_rollback_only_refuses_a_running_non_quadlet_leftover() {
+  # Structural pin: the mid-cutover-resume case (a stopped, non-Quadlet container still
+  # under its own name) must fall through to app_running before ql_die, not die on existence
+  # alone - or every resumed rollback would refuse itself again.
+  grep -Fq "app_running \"\$c\"" "$REPO/scripts/migrate-legacy.sh" \
+    || die_t "rollback() no longer distinguishes a running leftover from a stopped, not-yet-retired legacy container"
 }
 
 run() {

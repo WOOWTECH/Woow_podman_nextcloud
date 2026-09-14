@@ -112,7 +112,7 @@ case $cmd in
     mv "$S/containers/$1" "$S/containers/$2"; exit 0 ;;
   create)
     [[ ${SHIM_CREATE_RC:-0} == 0 ]] || { echo "Error: shim create refused" >&2; exit "$SHIM_CREATE_RC"; }
-    cargv=("$@") cname='' cpol='' cimg='' cnets=() cvols=()
+    cargv=("$@") cname='' cpol='' cimg='' cnets=() cvols=() cdeps=()
     ci=0
     while ((ci < ${#cargv[@]})); do
       a=${cargv[ci]}
@@ -126,8 +126,14 @@ case $cmd in
         --net | --network) cnets+=("${cargv[ci + 1]}"); ci=$((ci + 2)); continue ;;
         --net=* ) cnets+=("${a#--net=}"); ci=$((ci + 1)); continue ;;
         --network=*) cnets+=("${a#--network=}"); ci=$((ci + 1)); continue ;;
+        # --requires names containers this one depends on (comma-separated); `rm` on any of
+        # them must refuse while this container still exists (real podman: "has dependent
+        # containers"). tests/rollback-model.sh and the dependency-order tests write the
+        # same $d/requires file directly for fixtures that skip `podman create`.
+        --requires) cdeps+=("${cargv[ci + 1]}"); ci=$((ci + 2)); continue ;;
+        --requires=*) cdeps+=("${a#--requires=}"); ci=$((ci + 1)); continue ;;
         --label | -e | --env | -p | --publish | --healthcheck-command) ci=$((ci + 2)); continue ;;
-        --requires=* | --label=* | --env=* | --publish=*) ci=$((ci + 1)); continue ;;
+        --label=* | --env=* | --publish=*) ci=$((ci + 1)); continue ;;
         -*) ci=$((ci + 1)); continue ;;
         *) cimg=$a; break ;;
       esac
@@ -158,6 +164,8 @@ case $cmd in
     done
     : >"$d/networks"
     for n in "${cnets[@]:-}"; do [[ -n $n ]] && printf '%s|||\n' "$n" >>"$d/networks"; done
+    : >"$d/requires"
+    for r in "${cdeps[@]:-}"; do [[ -n $r ]] && printf '%s\n' "${r//,/$'\n'}" >>"$d/requires"; done
     printf 'podman\0' >"$d/createcommand.argv0"
     printf 'create\0' >>"$d/createcommand.argv0"
     printf '%s\0' "${cargv[@]}" >>"$d/createcommand.argv0"
@@ -167,6 +175,22 @@ case $cmd in
     for a in "$@"; do
       [[ $a == -* ]] && continue
       [[ -d $S/containers/$a ]] || { echo "Error: no such container $a" >&2; exit 1; }
+      # Real podman refuses to remove a container that another still-existing container's
+      # --requires names, even with -f (force only overrides the running-state check):
+      # "Error: container <a> has dependent containers which must be removed before it:
+      # <dep>: container is running or paused: consider using --force to remove them".
+      deps=()
+      for cd in "$S"/containers/*/requires; do
+        [[ -f $cd ]] || continue
+        dep=${cd%/requires}; dep=${dep##*/}
+        [[ -d $S/containers/$dep ]] || continue
+        [[ $dep == "$a" ]] && continue
+        grep -qxF -- "$a" "$cd" 2>/dev/null && deps+=("$dep")
+      done
+      if ((${#deps[@]})); then
+        echo "Error: container $a has dependent containers which must be removed before it: ${deps[*]}: container is running or paused: consider using --force to remove them" >&2
+        exit 2
+      fi
       rm -rf "$S/containers/$a"
     done
     exit 0 ;;

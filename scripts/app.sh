@@ -163,14 +163,25 @@ app_installed_version() {
   v=$(podman exec "$APP_CONTAINER" php -r 'require "/var/www/html/version.php"; echo implode(".", $OC_Version);' 2>/dev/null) || return 0
   printf '%s' "$(cut -d. -f1-3 <<<"$v")"
 }
-# app_image_version <image>: the NEXTCLOUD_VERSION the image ships (the upgrade target)
+# app_image_version <image>: the NEXTCLOUD_VERSION the image ships (the upgrade target), "" when
+# the image is not cached locally. Under `set -euo pipefail` a pipeline propagates the exit
+# status of `podman image inspect` even though `sed`/`tail` downstream succeed on empty input,
+# so a caller doing `tgt=$(app_image_version ...)` would die right here - before its own
+# "pull it, then read again" fallback (scripts/migrate-legacy.sh) ever runs - whenever the
+# exact resolved tag is not already cached. Capturing podman's output into a variable first,
+# with its own `|| out=''`, keeps that failure local to this function so it can always return
+# 0 with an empty string instead.
 app_image_version() {
-  podman image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1" 2>/dev/null \
-    | sed -n 's/^NEXTCLOUD_VERSION=//p' | tail -n1
+  local out
+  out=$(podman image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1" 2>/dev/null) || out=''
+  sed -n 's/^NEXTCLOUD_VERSION=//p' <<<"$out" | tail -n1
 }
 app_pg_major_running() { podman exec "$DB_CONTAINER" sh -c 'echo "$PG_MAJOR"' 2>/dev/null || true; }
+# app_pg_major_image <image>: same not-cached-locally pipefail hazard as app_image_version.
 app_pg_major_image() {
-  podman image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1" 2>/dev/null | sed -n 's/^PG_MAJOR=//p' | tail -n1
+  local out
+  out=$(podman image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1" 2>/dev/null) || out=''
+  sed -n 's/^PG_MAJOR=//p' <<<"$out" | tail -n1
 }
 # app_maintenance on|off: fails loudly. The old scripts hid this behind `|| true`, which is
 # how backups ended up being taken without maintenance mode.
@@ -324,6 +335,38 @@ app_legacy_capture() {
   done
 }
 
+# app_rm_ordered <container>...: podman rm every container, removing a container's
+# dependents (whatever another still-existing container's --requires names) before the
+# container itself. Confirmed live on woowtechopenclaw: `podman rm nextcloud-app` first
+# (LEGACY_ALL's order) failed with "has dependent containers ... nextcloud-cron", because
+# the legacy nextcloud-cron sidecar was created with --requires=nextcloud-app, aborting the
+# cutover mid-flight after maintenance mode was already on. Rather than hard-coding "cron
+# before app" (fragile if a host's legacy compose ever names things differently, or a future
+# app has a deeper chain), this retries whatever `podman rm` itself reports as still having
+# dependents, after any pass that made progress - a topological removal driven by podman's
+# own answer instead of an assumed edge.
+app_rm_ordered() {
+  local -a todo=("$@") next
+  local c out changed
+  while ((${#todo[@]})); do
+    next=() changed=0
+    for c in "${todo[@]}"; do
+      if ! podman container exists "$c"; then changed=1; continue; fi
+      # A plain rm on purpose: `podman rm -v` would delete the anonymous volumes that the
+      # capture records and expects to find again.
+      if out=$(podman rm "$c" 2>&1); then
+        changed=1
+      elif [[ $out == *"dependent container"* ]]; then
+        next+=("$c")
+      else
+        ql_die "podman rm $c failed: $out"
+      fi
+    done
+    ((changed)) || ql_die "cannot remove ${next[*]}: podman reports a dependency this could not resolve (a cycle, or a dependent outside this list)"
+    todo=("${next[@]}")
+  done
+}
+
 # app_legacy_retire <strategy> <suffix> <backup dir> <container>...: take the legacy
 # containers out of the new stack's way, in the shape the strategy asked for.
 app_legacy_retire() {
@@ -331,33 +374,47 @@ app_legacy_retire() {
   # <name>-legacy-<suffix> to name. ${2-} rather than ${2:?}, which would abort the script.
   local strategy=${1:?} sfx=${2-} bk=${3:?} c
   shift 3
-  for c in "$@"; do
-    case $strategy in
-      rename)
+  case $strategy in
+    rename)
+      for c in "$@"; do
         [[ -n $sfx ]] || ql_die "the rename path needs a suffix for $c-legacy-<suffix>"
         podman rename "$c" "$c-legacy-$sfx" || ql_die "podman rename $c failed"
-        ql_info "renamed $c -> $c-legacy-$sfx (stopped, kept for --rollback)" ;;
-      capture)
+        ql_info "renamed $c -> $c-legacy-$sfx (stopped, kept for --rollback)"
+      done ;;
+    capture)
+      for c in "$@"; do
         [[ -f $bk/legacy-container/$c/meta ]] || ql_die "no rollback copy of $c in $bk; nothing was removed"
-        # A plain rm on purpose: `podman rm -v` would delete the anonymous volumes that the
-        # capture records and expects to find again.
-        podman rm "$c" >/dev/null || ql_die "podman rm $c failed"
-        ql_info "removed $c; --rollback recreates it from $bk/legacy-container/$c" ;;
-      *) ql_die "unknown rollback strategy '$strategy'" ;;
-    esac
-  done
+      done
+      # Removed in dependency-safe order (app_rm_ordered), not the order the caller passed:
+      # see app_rm_ordered for why LEGACY_ALL's own order cannot be trusted.
+      app_rm_ordered "$@"
+      for c in "$@"; do
+        ql_info "removed $c; --rollback recreates it from $bk/legacy-container/$c"
+      done ;;
+    *) ql_die "unknown rollback strategy '$strategy'" ;;
+  esac
 }
 
 # app_legacy_restore <suffix> <backup dir> <container>...: bring the legacy containers back,
 # whichever shape the cutover used. A recreated container comes back stopped and with its
 # original restart policy; the caller starts it, exactly as it starts a renamed one.
+#
+# Resumable from any point app_legacy_retire could have stopped at (a partial cutover, e.g.
+# the dependency-ordering failure app_rm_ordered now avoids but an operator's history may
+# already have hit): a container already sitting under its own name, $c, is not an error -
+# it means retirement never got around to renaming/removing it, so there is nothing to
+# restore. The caller (migrate-legacy.sh's rollback()) has already cleared out any leftover
+# Quadlet container of that name before calling this, so an existing $c here is always the
+# legacy container itself.
 app_legacy_restore() {
   # An empty suffix means the cutover captured rather than renamed: there is no
   # <name>-legacy-<suffix> to look for, only the rollback copy.
   local sfx=${1-} bk=${2:?} c
   shift 2
   for c in "$@"; do
-    if [[ -n $sfx ]] && podman container exists "$c-legacy-$sfx"; then
+    if podman container exists "$c"; then
+      ql_info "$c already exists under its own name (a previous attempt did not finish retiring it); nothing to restore"
+    elif [[ -n $sfx ]] && podman container exists "$c-legacy-$sfx"; then
       podman rename "$c-legacy-$sfx" "$c" || ql_die "podman rename $c-legacy-$sfx failed"
       ql_info "renamed $c-legacy-$sfx -> $c"
     elif [[ -f $bk/legacy-container/$c/meta ]]; then
