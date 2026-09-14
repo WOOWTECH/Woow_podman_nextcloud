@@ -122,11 +122,25 @@ rollback() {
       ql_warn "$html/config/config.php is gone; put $saved back by hand (owner www-data, mode 0640)"
     fi
   fi
+  # A container still sitting under its original name, $c, here is one of two things: a
+  # Quadlet leftover from a cutover that got as far as install.sh (its PODMAN_SYSTEMD_UNIT
+  # label says so) - remove it, the code below does - or the legacy container itself,
+  # never retired because app_legacy_retire stopped partway through (the dependency-order
+  # failure app_rm_ordered now avoids, in scripts/app.sh, is exactly this shape: it can die
+  # after removing some legacy containers but not others). That second case is not a
+  # failure to resolve by hand; it is what a --rollback from a mid-cutover state looks like,
+  # and app_legacy_restore below already treats an existing $c as nothing to restore. Only a
+  # RUNNING, non-Quadlet container still counts as unexplained (the cutover always stops the
+  # legacy containers before retiring them), so that is the one case still refused.
   for c in "${renamed[@]}"; do
     if podman container exists "$c"; then
-      [[ $(podman inspect --format '{{index .Config.Labels "PODMAN_SYSTEMD_UNIT"}}' "$c") == nextcloud-*.service ]] \
-        || ql_die "container $c exists and is not a Quadlet leftover; resolve it by hand"
-      podman rm -f "$c" >/dev/null
+      if [[ $(podman inspect --format '{{index .Config.Labels "PODMAN_SYSTEMD_UNIT"}}' "$c") == nextcloud-*.service ]]; then
+        podman rm -f "$c" >/dev/null
+      elif app_running "$c"; then
+        ql_die "container $c exists, is running, and is not a Quadlet leftover; resolve it by hand"
+      else
+        ql_info "$c still exists under its own name (a previous cutover attempt did not finish retiring it); leaving it as is"
+      fi
     fi
   done
   # renamed back, or recreated from the capture the cutover took - whichever the host needed

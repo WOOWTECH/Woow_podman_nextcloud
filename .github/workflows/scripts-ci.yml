@@ -5,6 +5,9 @@
 # tests/rollback-model.sh drives the legacy rollback helpers of scripts/migrate-legacy.sh
 # against the doubles in tests/shims (podman, systemctl): no container is created and the
 # runner's user manager is never touched.
+#
+# tests/version-check.sh drives app_image_version/app_pg_major_image (scripts/app.sh), the
+# pre-flight image-version readers, against the same podman double.
 name: scripts-ci
 
 on:
@@ -32,3 +35,6 @@ jobs:
 
       - name: Legacy rollback model (rename vs capture)
         run: tests/rollback-model.sh
+
+      - name: Legacy version-check pre-flight (pipefail-safety, not-cached-locally)
+        run: tests/version-check.sh
