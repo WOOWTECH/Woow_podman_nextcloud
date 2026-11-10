@@ -6,7 +6,7 @@
 #                                          database and Redis directories, the secrets, the
 #                                          network and ~/.config/nextcloud/nextcloud.env
 #   scripts/uninstall.sh --purge [--yes]   also delete the network and the secrets (both
-#                                          secrets are exported first)
+#                                          three secrets are exported first)
 #   scripts/uninstall.sh --dry-run         report what would be removed
 #
 # --purge is the only way this repo deletes anything, and it NEVER deletes the bind-mounted
@@ -45,13 +45,13 @@ if ((!purge)); then
   exit 0
 fi
 
-app_confirm "--purge deletes the nextcloud-network and the podman secrets (the database and admin passwords)"
+app_confirm "--purge deletes the nextcloud-network and the podman secrets (database, admin and Office passwords)"
 if [[ ${QL_DRY_RUN:-0} != 1 ]]; then
-  systemctl --user stop "$TARGET" nextcloud-cron.timer nextcloud-app.service \
-    nextcloud-redis.service nextcloud-db.service 2>/dev/null || true
+  systemctl --user stop "$TARGET" nextcloud-cron.timer nextcloud-gateway.service \
+    nextcloud-office.service nextcloud-app.service nextcloud-redis.service nextcloud-db.service 2>/dev/null || true
   dest=$(app_new_backup_dir "$BACKUP_ROOT/purge-$(date +%Y%m%d-%H%M%S)")
   mkdir -p "$dest/secrets"
-  for s in "$SECRET_DB" "$SECRET_ADMIN"; do
+  for s in "$SECRET_DB" "$SECRET_ADMIN" "$SECRET_OFFICE"; do
     if podman secret exists "$s"; then app_save_secret "$s" "$dest/secrets/$s"; fi
   done
   [[ ! -f $ENV_FILE ]] || cp -p -- "$ENV_FILE" "$dest/"

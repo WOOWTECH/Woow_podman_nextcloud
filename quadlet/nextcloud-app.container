@@ -1,7 +1,7 @@
 # nextcloud-app.container: Nextcloud with Apache, listening on port 80 inside the container.
 #
 # Rendered by scripts/install.sh (decision D2) from ~/.config/nextcloud/nextcloud.env:
-#   HOST_BIND / HOST_PORT          the publish address (127.0.0.1:18080 by default)
+#   HOST_BIND / HOST_PORT          consumed by nextcloud-gateway.container
 #   HOST_HTML_DIR / HOST_DATA_DIR  /var/www/html and the user files below it
 # The same file is passed to the container with --env-file, so the image's settings
 # (NEXTCLOUD_TRUSTED_DOMAINS, OVERWRITEPROTOCOL, PHP_MEMORY_LIMIT, ...) live there.
@@ -27,11 +27,12 @@ After=nextcloud-db.service nextcloud-redis.service
 ContainerName=nextcloud-app
 # Upgrades: ONE major version at a time. scripts/upgrade.sh refuses anything else, because
 # the image's entrypoint would refuse it after the old container is already gone.
-Image=docker.io/library/nextcloud:34.0.3-apache
+Image=localhost/woow-nextcloud:35.0.1-office2
+Pull=never
 Network=nextcloud.network
 Volume=@@HOST_HTML_DIR@@:/var/www/html
 Volume=@@HOST_DATA_DIR@@:/var/www/html/data
-PublishPort=@@HOST_BIND@@:@@HOST_PORT@@:80
+# The gateway publishes HOST_PORT and serves Office on this same origin.
 EnvironmentFile=%h/.config/nextcloud/nextcloud.env
 # --env beats --env-file, so these cannot drift from the database unit.
 Environment=POSTGRES_HOST=nextcloud-db

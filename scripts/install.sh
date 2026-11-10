@@ -13,9 +13,8 @@
 #                             rsyncs the release and may run occ upgrade)
 #   --dry-run                 render and validate, report what would change; change nothing
 #
-# On a fresh install (no config/config.php in the html directory yet) it also enables the
-# cron background-job mode, creates the pgvector extension and adds the missing database
-# indices once Nextcloud is up.
+# Once Nextcloud is up, it ensures cron background jobs, pgvector, missing indices and
+# Collabora Office are configured. These steps are safe to repeat after an interrupted run.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -51,7 +50,7 @@ render_env=$ENV_FILE
 if [[ ! -f $ENV_FILE ]]; then
   render_env=$ENV_EXAMPLE # --dry-run on a fresh host: render the defaults
 elif [[ $QL_ENV_CREATED == 1 ]]; then
-  ql_info "review $ENV_FILE (the four HOST_*_DIR values and NEXTCLOUD_TRUSTED_DOMAINS), then run $0 again"
+  ql_info "review $ENV_FILE (data paths, NEXTCLOUD_PUBLIC_URL, Collabora settings and trusted domains), then run $0 again"
   exit 0
 fi
 ql_env_load "$render_env"
@@ -88,6 +87,7 @@ if [[ $dry != 1 ]] && ! podman unshare test -f "$html_dir/config/config.php"; th
 # ---- 5. data directories, images and secrets before any unit changes -----------------------
 if [[ $dry != 1 ]]; then
   for k in "${DATA_DIR_KEYS[@]}"; do app_ensure_dir "$(app_dir "$k")"; done
+  "$REPO/scripts/build-app.sh"
 fi
 ql_pull_images "$WORK/out"
 if [[ -n $db_pw_file ]]; then
@@ -108,10 +108,12 @@ if [[ -n $admin_pw_file ]]; then
 else
   ql_secret_ensure "$SECRET_ADMIN" random:24
 fi
+ql_secret_ensure "$SECRET_OFFICE" random:24
 
 # ---- 6. install changed files, then start / restart only what changed ---------------------
 changed=$(ql_install_files "$WORK/out" "$APP")
 [[ -z $changed ]] || ql_info "changed: $(tr '\n' ' ' <<<"$changed")"
+app_gateway_config
 [[ $render_env != "$ENV_FILE" ]] || app_env_mark_if_changed
 if [[ $dry == 1 ]]; then
   ql_info "dry-run complete; nothing was changed"
@@ -123,19 +125,23 @@ if ((no_start)); then
   ql_info "installed; not started (--no-start). Start with: systemctl --user start $TARGET"
   exit 0
 fi
+# Podman reset can remove the bridge while its generated systemd unit still says active.
+# Recreate it before starting containers, using the installed Quadlet source.
+if systemctl --user is-active --quiet nextcloud-network.service && ! podman network exists nextcloud-network; then
+  systemctl --user daemon-reload
+  systemctl --user restart nextcloud-network.service
+fi
 ql_apply_units "$APP" "${units[@]}"
 app_env_record
 
-# ---- 7. first install: background jobs, pgvector, indices ----------------------------------
-if ((fresh)); then
-  ql_info "first install: waiting for Nextcloud to finish its setup (up to ${smoke_timeout}s)"
-  app_wait_status "$smoke_timeout" || ql_die "Nextcloud did not finish its setup; see: journalctl --user -u nextcloud-app.service -n 100"
-  ql_info "admin user: $(ql_env_get NEXTCLOUD_ADMIN_USER admin), password: podman secret inspect --showsecret $SECRET_ADMIN"
-  app_occ background:cron >/dev/null || ql_warn "occ background:cron failed"
-  podman exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q -c 'CREATE EXTENSION IF NOT EXISTS vector' \
-    || ql_warn "could not create the pgvector extension (the Recognize app needs it)"
-  app_occ db:add-missing-indices >/dev/null || ql_warn "occ db:add-missing-indices failed"
-fi
+# ---- 7. configure Nextcloud after it is ready. These operations are idempotent, so a
+# failed first run can be resumed without leaving cron or vector unconfigured.
+((!fresh)) || ql_info "first install: admin user $(ql_env_get NEXTCLOUD_ADMIN_USER admin); password: podman secret inspect --showsecret $SECRET_ADMIN"
+app_wait_status "$smoke_timeout" || ql_die "Nextcloud did not finish its setup; see: journalctl --user -u nextcloud-app.service -n 100"
+app_occ background:cron >/dev/null
+podman exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -q -c 'CREATE EXTENSION IF NOT EXISTS vector' >/dev/null
+app_occ db:add-missing-indices >/dev/null
+"$REPO/scripts/configure-office.sh"
 
 # ---- 8. smoke ------------------------------------------------------------------------------
 if ((no_smoke)); then

@@ -23,9 +23,12 @@ DB_USER=nextcloud
 DB_NAME=nextcloud
 SECRET_DB=nextcloud-db-password
 SECRET_ADMIN=nextcloud-admin-password
+SECRET_OFFICE=nextcloud-office-password
+OFFICE_CONTAINER=nextcloud-office
+GATEWAY_CONTAINER=nextcloud-gateway
 DATA_DIR_KEYS=(HOST_HTML_DIR HOST_DATA_DIR HOST_POSTGRES_DIR HOST_REDIS_DIR)
 # Units whose container reads ~/.config/nextcloud/nextcloud.env.
-ENV_READERS=(nextcloud-app.service)
+ENV_READERS=(nextcloud-app.service nextcloud-office.service)
 
 # ---- pins (the repo is the source of truth for every version) ---------------------------
 app_pin() { sed -n 's/^Image=//p' "$REPO/quadlet/$1" | tail -n1; }
@@ -45,15 +48,18 @@ app_installed_image() {
 APP_IMAGE=$(app_pin nextcloud-app.container)
 DB_IMAGE=$(app_pin nextcloud-db.container)
 REDIS_IMAGE=$(app_pin nextcloud-redis.container)
+OFFICE_IMAGE=$(app_pin nextcloud-office.container)
+GATEWAY_IMAGE=$(app_pin nextcloud-gateway.container)
 
 # ---- per-host settings --------------------------------------------------------------------
 app_units() {
   printf '%s\n' "$TARGET" nextcloud-db.service nextcloud-redis.service nextcloud-app.service \
-    nextcloud-cron.timer nextcloud-cron.service
+    nextcloud-office.service nextcloud-gateway.service nextcloud-cron.timer
 }
 app_containers() {
   printf '%s\n' "$DB_CONTAINER:nextcloud-db.service" "$REDIS_CONTAINER:nextcloud-redis.service" \
-    "$APP_CONTAINER:nextcloud-app.service"
+    "$APP_CONTAINER:nextcloud-app.service" "$OFFICE_CONTAINER:nextcloud-office.service" \
+    "$GATEWAY_CONTAINER:nextcloud-gateway.service"
 }
 
 # app_spec_path <abs path>: rewrite $HOME/... as %h/... so a rendered unit carries no
@@ -77,11 +83,22 @@ app_ensure_dir() {
 
 # app_validate_env: dies on a value the units or Nextcloud cannot work with
 app_validate_env() {
-  local port k d fs html
+  local port k d fs html public host termination authority
   ql_assert_match HOST_BIND "$(ql_env_get HOST_BIND)" '[0-9]{1,3}(\.[0-9]{1,3}){3}|\[[0-9A-Fa-f:.]+\]'
   port=$(ql_env_get HOST_PORT)
   ql_assert_match HOST_PORT "$port" '[0-9]{1,5}'
   ((10#$port >= 1 && 10#$port <= 65535)) || ql_die "HOST_PORT=$port is not a TCP port"
+  public=$(ql_env_get NEXTCLOUD_PUBLIC_URL)
+  [[ $public =~ ^https?://[^/[:space:]]+(:[0-9]+)?$ ]] || ql_die "NEXTCLOUD_PUBLIC_URL must be an HTTP(S) origin without a path"
+  host=$(ql_env_get COLLABORA_SERVER_NAME)
+  [[ $host =~ ^[^/:[:space:]]+(:[0-9]+)?$ ]] || ql_die "COLLABORA_SERVER_NAME must be the public host[:port]"
+  authority=${public#*://}
+  [[ $host == "$authority" ]] || ql_die "COLLABORA_SERVER_NAME must equal the host[:port] in NEXTCLOUD_PUBLIC_URL"
+  termination=$(ql_env_get COLLABORA_SSL_TERMINATION)
+  [[ $termination == true || $termination == false ]] || ql_die "COLLABORA_SSL_TERMINATION must be true or false"
+  if [[ $public == https://* && $termination != true ]] || [[ $public == http://* && $termination != false ]]; then
+    ql_die "COLLABORA_SSL_TERMINATION must match NEXTCLOUD_PUBLIC_URL's scheme"
+  fi
   for k in "${DATA_DIR_KEYS[@]}"; do
     d=$(ql_env_get "$k")
     [[ $d == /* || $d == '%h/'* ]] || ql_die "$k=$d must be an absolute path or start with %h/ (your home directory)"
@@ -106,6 +123,14 @@ app_validate_env() {
     [[ -z ${QL_ENV[$k]+x} ]] || ql_warn "$k in $ENV_FILE is ignored: nextcloud-app.container sets it (passwords are podman secrets)"
   done
   return 0
+}
+
+app_gateway_config() {
+  local src=$REPO/config/gateway.conf dest=$HOME/.config/nextcloud/gateway.conf
+  if [[ -f $dest ]] && cmp -s "$src" "$dest"; then return 0; fi
+  if [[ ${QL_DRY_RUN:-0} == 1 ]]; then ql_info "[dry-run] would install $dest"; return 0; fi
+  install -m 644 -- "$src" "$dest" || ql_die "cannot install $dest"
+  ql_mark_changed "$APP" nextcloud-gateway.service
 }
 
 # app_base_url: where this host reaches the published port

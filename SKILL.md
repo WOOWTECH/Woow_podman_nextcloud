@@ -3,7 +3,7 @@
 ## Metadata
 
 - **Name**: deploy-nextcloud-postgres
-- **Description**: Deploy Nextcloud with PostgreSQL 16 (pgvector) and Redis as rootless
+- **Description**: Deploy Nextcloud Office with PostgreSQL 16 (pgvector) and Redis as rootless
   Podman Quadlet units managed by the user's systemd
 - **Trigger**: the user asks to deploy Nextcloud, set up self-hosted file storage, or migrate
   an existing Nextcloud compose / manual deployment
@@ -23,7 +23,7 @@ git clone https://github.com/WOOWTECH/Woow_podman_nextcloud ~/woow-quadlet/Woow_
 cd ~/woow-quadlet/Woow_podman_nextcloud
 tests/dryrun.sh                              # validates the units, creates nothing
 scripts/install.sh                           # creates ~/.config/nextcloud/nextcloud.env, then stops
-# edit HOST_BIND, HOST_PORT, the four HOST_*_DIR paths and NEXTCLOUD_TRUSTED_DOMAINS
+# edit the data paths, NEXTCLOUD_PUBLIC_URL, Collabora settings and trusted domains
 scripts/install.sh                           # installs, starts, runs tests/smoke.sh
 podman secret inspect --showsecret nextcloud-admin-password
 ```
@@ -40,7 +40,7 @@ untrusted domain".
 
 ```bash
 tests/smoke.sh                               # units, healthchecks, status.php, occ, cron, listeners
-curl -fsS http://127.0.0.1:18080/status.php  # installed:true, maintenance:false
+curl -fsS http://127.0.0.1:18081/status.php  # installed:true, maintenance:false
 systemctl --user list-timers nextcloud-cron.timer
 ```
 
@@ -70,7 +70,7 @@ checks it against the SCRAM verifier and `--fix-db-password` repairs it before t
 | logs | `journalctl --user -u nextcloud-app.service -f` |
 | restart the stack | `systemctl --user restart nextcloud.target` |
 | run cron.php now | `systemctl --user start nextcloud-cron.service` |
-| upgrade | bump `Image=` in `quadlet/nextcloud-app.container`, `git pull`, `scripts/upgrade.sh` |
+| upgrade | bump the image tag and `Containerfile` base digest together, `git pull`, `scripts/upgrade.sh` |
 | backup | `scripts/backup.sh` (add `--cold` for a byte copy of html and PGDATA) |
 | restore | `scripts/restore.sh ~/backups/nextcloud/<timestamp>` |
 | uninstall | `scripts/uninstall.sh` (`--purge --yes` also deletes the network and secrets) |
@@ -81,11 +81,12 @@ checks it against the SCRAM verifier and `--fix-db-password` repairs it before t
 nextcloud.target
 ├── nextcloud-db.service     docker.io/pgvector/pgvector:0.8.6-pg16   HOST_POSTGRES_DIR
 ├── nextcloud-redis.service  docker.io/library/redis:8.10.1-alpine    HOST_REDIS_DIR
-├── nextcloud-app.service    docker.io/library/nextcloud:34.0.3-apache
+├── nextcloud-app.service    localhost/woow-nextcloud:35.0.1-office2
 │                            HOST_HTML_DIR -> /var/www/html, HOST_DATA_DIR -> .../data
-│                            PublishPort HOST_BIND:HOST_PORT -> 80
+├── nextcloud-office.service collabora/code:26.04.4.2.1
+├── nextcloud-gateway.service HOST_BIND:HOST_PORT -> 8080
 └── nextcloud-cron.timer -> nextcloud-cron.service (podman exec ... cron.php, every 5 min)
-network nextcloud-network · secrets nextcloud-db-password, nextcloud-admin-password
+network nextcloud-network · secrets for database, admin and Office console
 ```
 
 ## Rules for an agent working on this repo
@@ -97,7 +98,7 @@ network nextcloud-network · secrets nextcloud-db-password, nextcloud-admin-pass
 3. `occ` and `cron.php` always run as `www-data`. Never hide a failed
    `occ maintenance:mode --on` behind `|| true`; that is how backups were taken of a live
    instance before.
-4. Never put a password into `~/.config/nextcloud/nextcloud.env` or a unit: use podman secrets.
+4. Keep database, Nextcloud admin and Office console passwords in podman secrets. Optional SMTP credentials may live in the 0600 environment file.
    Never add a key starting with `NC_` to the env file — Nextcloud reads it as a `config.php`
    override.
 5. Never delete a data directory to "clean up". `uninstall.sh --purge` exists, it backs the

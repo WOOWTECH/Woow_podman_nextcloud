@@ -1,9 +1,9 @@
 # Nextcloud on rootless Podman (Quadlet + systemd)
 
-[Nextcloud](https://nextcloud.com/) with PostgreSQL 16 (pgvector) and Redis, deployed as
+[Nextcloud 35.0.1](https://nextcloud.com/) with Collabora Office, PostgreSQL 16 (pgvector) and Redis, deployed as
 **rootless Podman Quadlet units** driven by the user's systemd. The units are the deployment:
 systemd starts the stack at boot (with linger), restarts a crashed container, runs the
-background jobs from a timer and keeps every version pinned in this repository.
+background jobs from a timer and pins the container image versions in this repository.
 
 [繁體中文版](README_zh-TW.md)
 
@@ -12,18 +12,13 @@ background jobs from a timer and keeps every version pinned in this repository.
 ```
         systemctl --user start|stop|restart nextcloud.target
                               │
-   ┌──────────────────────────┼───────────────────────────┐
-   │                          │                           │
-nextcloud-db.service   nextcloud-redis.service   nextcloud-app.service
-pgvector/pgvector      redis:8.10.1-alpine       nextcloud:34.0.3-apache
- :0.8.6-pg16                 │                           │
-   │ HOST_POSTGRES_DIR       │ HOST_REDIS_DIR            │ HOST_HTML_DIR
-   │                         │                           │ HOST_DATA_DIR
-   └──────────── network nextcloud-network ──────────────┘
-                                                          │
-                              PublishPort HOST_BIND:HOST_PORT -> 80
-                              (127.0.0.1:18080 by default; a Cloudflare
-                               tunnel or NPM provides public access)
+   ├─ nextcloud-db.service       PostgreSQL 16 + pgvector
+   ├─ nextcloud-redis.service    Redis AOF
+   ├─ nextcloud-app.service      Nextcloud 35.0.1 + media, SMB and DAV tools
+   ├─ nextcloud-office.service   Collabora CODE 26.04.4.2
+   └─ nextcloud-gateway.service  one origin for Nextcloud and Office
+      PublishPort HOST_BIND:HOST_PORT -> 8080 (default 127.0.0.1:18081)
+      / -> Nextcloud; /hosting, /browser, /cool -> Collabora
 
         nextcloud-cron.timer ──every 5 min──> nextcloud-cron.service
               podman exec -u www-data nextcloud-app php -f cron.php
@@ -35,13 +30,15 @@ pgvector/pgvector      redis:8.10.1-alpine       nextcloud:34.0.3-apache
 | `quadlet/nextcloud-db.container` | `nextcloud-db.service` | PostgreSQL 16 + pgvector |
 | `quadlet/nextcloud-redis.container` | `nextcloud-redis.service` | distributed memcache and file locking |
 | `quadlet/nextcloud-app.container` | `nextcloud-app.service` | Nextcloud (Apache, port 80 inside) |
+| `quadlet/nextcloud-office.container` | `nextcloud-office.service` | Collabora CODE, private port 9980 and a 2 GiB temporary document filesystem |
+| `quadlet/nextcloud-gateway.container` | `nextcloud-gateway.service` | same-origin HTTP gateway |
 | `systemd/nextcloud-cron.service` | `nextcloud-cron.service` | one run of `cron.php` |
 | `systemd/nextcloud-cron.timer` | `nextcloud-cron.timer` | every 5 minutes |
 | `systemd/nextcloud.target` | `nextcloud.target` | one handle for the whole stack |
 
 Installed to `~/.config/containers/systemd/` (Quadlet), `~/.config/systemd/user/` (the target,
 the cron service and its timer) and `~/.config/nextcloud/nextcloud.env` (settings, mode 0600).
-Passwords are podman secrets, never env files.
+The database, administrator and Office console passwords are podman secrets. Optional SMTP credentials are stored in the private env file when configured there.
 
 **There is no cron container.** The old `nextcloud-cron` container ran busybox crond; a
 `Type=oneshot` service behind a timer cannot overlap runs, shows up in
@@ -56,7 +53,7 @@ could connect to PostgreSQL as a superuser without a password, and to Redis with
 
 - Ubuntu 24.04 or similar, **podman >= 4.9.3** rootless, systemd 255 user units
 - linger for the service user (`sudo loginctl enable-linger $USER`), so the stack survives logout
-- about 1.3 GB of disk for the images, plus the html directory (~900 MB), the database and
+- at least 6 GB of free disk for the images and initial html directory, plus the database and
   the user files
 - the PostgreSQL directory must be on a **local filesystem** (never NFS or SMB);
   `install.sh` checks
@@ -72,7 +69,7 @@ git clone https://github.com/WOOWTECH/Woow_podman_nextcloud ~/woow-quadlet/Woow_
 cd ~/woow-quadlet/Woow_podman_nextcloud
 tests/dryrun.sh                               # optional: validates the units, creates nothing
 scripts/install.sh                            # first run: creates the env file, then stops
-$EDITOR ~/.config/nextcloud/nextcloud.env     # the four HOST_*_DIR paths and the trusted domains
+$EDITOR ~/.config/nextcloud/nextcloud.env     # data paths, public URL and trusted domains
 scripts/install.sh                            # installs, starts and runs the smoke test
 ```
 
@@ -84,9 +81,11 @@ It prints how to read the generated admin password:
 podman secret inspect --showsecret nextcloud-admin-password
 ```
 
-Open `http://127.0.0.1:18080/` (or whatever `HOST_BIND:HOST_PORT` you set). **Every name or
+Open `http://127.0.0.1:18081/` (or the `NEXTCLOUD_PUBLIC_URL` you set). **Every name or
 address you reach it by must be in `NEXTCLOUD_TRUSTED_DOMAINS`**, or Nextcloud answers
 "access through untrusted domain".
+Open Office documents through the exact `NEXTCLOUD_PUBLIC_URL` origin. An alternate trusted
+address can show the file list while the browser blocks the Collabora editor frame.
 
 Options: `--db-password-file F` and `--admin-password-file F` (first install only),
 `--no-start`, `--no-smoke`, `--smoke-timeout S`, `--dry-run` (render and validate only).
@@ -102,16 +101,21 @@ work. Re-run `scripts/install.sh` after an edit: it restarts only what changed.
 | Key | Default | Meaning |
 |---|---|---|
 | `HOST_BIND` | `127.0.0.1` | publish address. `0.0.0.0` exposes Nextcloud on every interface |
-| `HOST_PORT` | `18080` | published port (Apache listens on 80 inside the container) |
+| `HOST_PORT` | `18081` | published port (gateway listens on 8080 inside the container) |
 | `HOST_HTML_DIR` | `%h/.local/share/nextcloud/html` | `/var/www/html`: the code, the apps and `config/config.php` |
 | `HOST_DATA_DIR` | `%h/.local/share/nextcloud/data` | `/var/www/html/data`: the user files — the one that grows |
 | `HOST_POSTGRES_DIR` | `%h/.local/share/nextcloud/postgres` | PGDATA. Local disk only |
 | `HOST_REDIS_DIR` | `%h/.local/share/nextcloud/redis` | the Redis append-only file |
 | `NEXTCLOUD_ADMIN_USER` | `admin` | first install only |
 | `NEXTCLOUD_TRUSTED_DOMAINS` | `localhost 127.0.0.1` | space-separated; written on the first start |
+| `NEXTCLOUD_PUBLIC_URL` | `http://127.0.0.1:18081` | canonical browser and Office WOPI origin |
+| `COLLABORA_SERVER_NAME` | `127.0.0.1:18081` | public host and optional port, without scheme |
+| `COLLABORA_SSL_TERMINATION` | `false` | set `true` when `NEXTCLOUD_PUBLIC_URL` uses HTTPS |
+| `DEFAULT_PHONE_REGION` | `TW` | phone region |
 | `OVERWRITEPROTOCOL` | empty | set `https` behind a TLS proxy or tunnel that sends no `X-Forwarded-Proto` |
 | `OVERWRITECLIURL`, `TRUSTED_PROXIES` | empty | read by the image's `reverse-proxy.config.php` |
-| `PHP_MEMORY_LIMIT`, `PHP_UPLOAD_LIMIT` | `512M` | PHP limits |
+| `PHP_MEMORY_LIMIT`, `PHP_UPLOAD_LIMIT` | `1024M`, `16G` | PHP limits; disk capacity still limits uploads |
+| `SMTP_*`, `MAIL_*` | empty | optional mail settings supported by the official image |
 
 Each `HOST_*_DIR` is an absolute path, or starts with `%h/` for your home directory. A path
 that already holds a Nextcloud is adopted as it is — nothing is copied or moved (decision D9).
@@ -131,6 +135,7 @@ that already holds a Nextcloud is adopted as it is — nothing is copied or move
 |---|---|
 | `nextcloud-db-password` | `POSTGRES_PASSWORD`: initdb, and Nextcloud's first install |
 | `nextcloud-admin-password` | `NEXTCLOUD_ADMIN_PASSWORD`: install-time only, ignored afterwards |
+| `nextcloud-office-password` | Collabora admin console login (`admin`) |
 
 Once Nextcloud is installed it authenticates as the `oc_admin` role with the `dbpassword` in
 `config.php`, which is Nextcloud-owned state inside the html directory.
@@ -178,13 +183,16 @@ podman exec nextcloud-db psql -U nextcloud -d nextcloud -c "SELECT extname, extv
 
 ### Behind a Cloudflare tunnel or Nginx Proxy Manager
 
-Keep `HOST_BIND=127.0.0.1`, point the tunnel or proxy at `http://localhost:18080`, and set in
+Keep `HOST_BIND=127.0.0.1`, point the tunnel or proxy at `http://localhost:18081`, and set in
 `~/.config/nextcloud/nextcloud.env`:
 
 ```ini
 OVERWRITEPROTOCOL=https
 OVERWRITECLIURL=https://cloud.example.com
-TRUSTED_PROXIES=127.0.0.1
+NEXTCLOUD_PUBLIC_URL=https://cloud.example.com
+COLLABORA_SERVER_NAME=cloud.example.com
+COLLABORA_SSL_TERMINATION=true
+TRUSTED_PROXIES=10.89.0.0/16
 NEXTCLOUD_TRUSTED_DOMAINS=localhost cloud.example.com
 ```
 
@@ -198,8 +206,8 @@ this repository does not install `cloudflared`.
 
 ## Upgrade
 
-The repository is the source of truth: bump `Image=` in `quadlet/nextcloud-app.container`,
-commit, then:
+The repository is the source of truth: bump the tag in `quadlet/nextcloud-app.container`
+and the matching base digest in `Containerfile`, commit both, then:
 
 ```bash
 git pull
