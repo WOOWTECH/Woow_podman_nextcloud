@@ -274,8 +274,7 @@ ql_assert_match "the publish port" "$port" '[0-9]{1,5}'
 cur=$(app_installed_version)
 tgt=$(app_image_version "$APP_IMAGE")
 if [[ -z $tgt ]]; then
-  ql_info "pulling $APP_IMAGE to read its version"
-  podman pull "$APP_IMAGE" >/dev/null || ql_die "podman pull $APP_IMAGE failed"
+  "$REPO/scripts/build-app.sh"
   tgt=$(app_image_version "$APP_IMAGE")
 fi
 [[ -n $cur && $cur == "$tgt" ]] \
@@ -314,7 +313,7 @@ elif [[ $scram == *match=unknown* ]]; then
 fi
 
 derive_env() {
-  local f=$1 k v
+  local f=$1 k v public host
   ql_env_set "$f" HOST_BIND "$bind"
   ql_env_set "$f" HOST_PORT "$port"
   ql_env_set "$f" HOST_HTML_DIR "$(app_spec_path "$legacy_html")"
@@ -326,6 +325,16 @@ derive_env() {
     v=$(legacy_get "$k")
     [[ -z $v ]] || ql_env_set "$f" "$k" "$v"
   done
+  public=$(legacy_get OVERWRITECLIURL)
+  [[ -n $public ]] || public="http://127.0.0.1:$port"
+  host=${public#*://}; host=${host%%/*}
+  ql_env_set "$f" NEXTCLOUD_PUBLIC_URL "$public"
+  ql_env_set "$f" COLLABORA_SERVER_NAME "$host"
+  if [[ $public == https://* ]]; then
+    ql_env_set "$f" COLLABORA_SSL_TERMINATION true
+  else
+    ql_env_set "$f" COLLABORA_SSL_TERMINATION false
+  fi
 }
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/$APP-migrate.XXXXXX")
 ql_cleanup work rm -rf "$WORK"

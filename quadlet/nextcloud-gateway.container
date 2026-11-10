@@ -1,0 +1,29 @@
+[Unit]
+Description=Nextcloud and Office same-origin gateway
+Documentation=https://github.com/WOOWTECH/Woow_podman_nextcloud
+PartOf=nextcloud.target
+Requires=nextcloud-app.service nextcloud-office.service
+After=nextcloud-app.service nextcloud-office.service
+
+[Container]
+ContainerName=nextcloud-gateway
+Image=docker.io/nginxinc/nginx-unprivileged:1.29.3-alpine
+Network=nextcloud.network
+Volume=%h/.config/nextcloud/gateway.conf:/etc/nginx/conf.d/default.conf:ro
+PublishPort=@@HOST_BIND@@:@@HOST_PORT@@:8080
+Label=io.woowtech.app=nextcloud
+LogDriver=journald
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:8080/status.php || exit 1
+HealthInterval=30s
+HealthTimeout=15s
+HealthRetries=3
+HealthStartPeriod=600s
+
+[Service]
+SuccessExitStatus=143
+Restart=always
+RestartSec=10
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

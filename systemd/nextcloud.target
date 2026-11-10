@@ -4,7 +4,7 @@
 [Unit]
 Description=Nextcloud stack
 Documentation=https://github.com/WOOWTECH/Woow_podman_nextcloud
-Wants=nextcloud-db.service nextcloud-redis.service nextcloud-app.service nextcloud-cron.timer
+Wants=nextcloud-db.service nextcloud-redis.service nextcloud-app.service nextcloud-office.service nextcloud-gateway.service nextcloud-cron.timer
 
 [Install]
 WantedBy=default.target

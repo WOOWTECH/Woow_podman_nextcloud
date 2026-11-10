@@ -9,7 +9,7 @@
 # pipeline even though sed and tail both exit 0 on empty input: bash's pipefail reports the
 # exit status of the last command IN THE PIPELINE to fail, not the last command to run, so
 # `tgt=$(app_image_version "$APP_IMAGE")` died right there - before migrate-legacy.sh's own
-# "empty? pull it, then read again" fallback a few lines below ever ran. The fix reads
+# "empty? build it, then read again" fallback a few lines below ever ran. The fix reads
 # podman's output into a local variable first (with its own `|| out=''`), so the function
 # always returns 0 with an empty string instead of propagating podman's exit code.
 #
@@ -67,13 +67,12 @@ t_uncached_pg_major_image_returns_empty_not_a_pipefail_death() {
   eq "$out" "" "an uncached image has no PG_MAJOR to report"
 }
 # The exact scenario migrate-legacy.sh's pre-flight relies on: read tgt (empty, uncached),
-# pull, read again (now cached) - all three steps must run without the script dying partway.
-t_the_pull_then_reread_fallback_now_runs_to_completion() {
+# build, read again (now cached) - all three steps must run without the script dying partway.
+t_the_build_then_reread_fallback_now_runs_to_completion() {
   local tgt
   tgt=$(app_image_version "$APP_IMAGE")
   eq "$tgt" "" "uncached: empty, as migrate-legacy.sh's own \`[[ -z \$tgt ]]\` expects"
-  podman pull "$APP_IMAGE" >/dev/null
-  cache_image "$APP_IMAGE" 34.0.3
+  cache_image "$APP_IMAGE" 35.0.1
   tgt=$(app_image_version "$APP_IMAGE")
   eq "$tgt" "" "the shim's cache_image does not fabricate a Config.Env NEXTCLOUD_VERSION; presence of an image id is what matters"
 }

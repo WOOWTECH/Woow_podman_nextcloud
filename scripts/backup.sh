@@ -69,17 +69,22 @@ app_maintenance on
 maint=1
 app_dump_db "$dest/nextcloud.pgdump"
 app_dump_roles "$dest/roles.sql"
-if [[ -d $html_dir/config ]]; then
-  ql_backup_dir "$html_dir/config" "$dest/config.tgz" >/dev/null
+if podman unshare test -d "$html_dir/config"; then
+  # html is owned by a container subuid with mode 0700. The host shell cannot
+  # traverse it; tar has to run entirely inside podman unshare.
+  (umask 077 && podman unshare tar --numeric-owner -czf "$dest/config.tgz.partial" -C "$html_dir" config) \
+    || ql_die "could not archive $html_dir/config"
+  mv -f -- "$dest/config.tgz.partial" "$dest/config.tgz"
 else
   ql_warn "$html_dir/config does not exist yet; the backup has no config.tgz"
 fi
 ((no_data)) || ql_backup_dir "$data_dir" "$dest/data.tgz" >/dev/null
 mkdir -p "$dest/secrets"
-for s in "$SECRET_DB" "$SECRET_ADMIN"; do
+for s in "$SECRET_DB" "$SECRET_ADMIN" "$SECRET_OFFICE"; do
   if podman secret exists "$s"; then app_save_secret "$s" "$dest/secrets/$s"; fi
 done
 [[ ! -f $ENV_FILE ]] || cp -p -- "$ENV_FILE" "$dest/"
+[[ ! -f $HOME/.config/nextcloud/gateway.conf ]] || cp -p -- "$HOME/.config/nextcloud/gateway.conf" "$dest/"
 if app_is_installed; then app_snapshot_units "$dest/units"; fi
 {
   printf 'nextcloud version: %s\n' "$(app_installed_version)"

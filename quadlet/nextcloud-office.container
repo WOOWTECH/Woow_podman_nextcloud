@@ -1,0 +1,28 @@
+[Unit]
+Description=Nextcloud Collabora Office
+Documentation=https://github.com/WOOWTECH/Woow_podman_nextcloud
+PartOf=nextcloud.target
+
+[Container]
+ContainerName=nextcloud-office
+Image=docker.io/collabora/code:26.04.4.2.1
+Network=nextcloud.network
+# Collabora refuses document loads when its jail filesystem has under 5% free.
+# Keep these temporary copies on a bounded filesystem even when the host root is busy.
+Tmpfs=/opt/cool/child-roots:rw,size=2g,mode=1777
+Environment=aliasgroup1=@@NEXTCLOUD_PUBLIC_URL@@
+Environment=server_name=@@COLLABORA_SERVER_NAME@@
+Environment=username=admin
+Environment="extra_params=--o:ssl.enable=false --o:ssl.termination=@@COLLABORA_SSL_TERMINATION@@ --o:mount_jail_tree=false --o:security.seccomp=false --o:security.capabilities=false"
+Secret=nextcloud-office-password,type=env,target=password
+Label=io.woowtech.app=nextcloud
+LogDriver=journald
+
+[Service]
+SuccessExitStatus=143
+Restart=always
+RestartSec=10
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

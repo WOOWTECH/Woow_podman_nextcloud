@@ -5,11 +5,11 @@
 #
 #   scripts/upgrade.sh [--repair] [--yes]
 #
-# backup -> pull -> restart -> smoke -> automatic rollback:
+# backup -> build -> restart -> smoke -> automatic rollback:
 #  1. gates, before anything stops: no downgrade, and ONE major version at a time. The
 #     image's entrypoint enforces the same rule, but by then the old container is gone, so
 #     this script checks first and refuses to start the upgrade at all.
-#  2. pulls the image (also to read its NEXTCLOUD_VERSION) and refuses a PostgreSQL major change
+#  2. builds the app image (also to read its NEXTCLOUD_VERSION) and refuses a PostgreSQL major change
 #  3. maintenance mode on, scripts/backup.sh --cold --no-data into
 #     ~/backups/nextcloud/upgrade-<timestamp>/: the dump, the roles, config, the html
 #     directory and the database directory. The user files are not touched by an upgrade.
@@ -45,8 +45,7 @@ html_dir=$(app_dir HOST_HTML_DIR)
 postgres_dir=$(app_dir HOST_POSTGRES_DIR)
 
 # ---- 1. and 2. gates --------------------------------------------------------------------------
-ql_info "pulling $APP_IMAGE"
-podman image exists "$APP_IMAGE" || podman pull "$APP_IMAGE" >/dev/null || ql_die "podman pull $APP_IMAGE failed; nothing was changed"
+"$REPO/scripts/build-app.sh"
 for i in "$DB_IMAGE" "$REDIS_IMAGE"; do
   podman image exists "$i" || podman pull "$i" >/dev/null || ql_die "podman pull $i failed; nothing was changed"
 done
@@ -105,6 +104,7 @@ if ((ok)); then
   app_occ db:add-missing-columns >/dev/null || ql_warn "occ db:add-missing-columns failed"
   app_occ db:add-missing-primary-keys >/dev/null || ql_warn "occ db:add-missing-primary-keys failed"
   app_occ app:update --all >/dev/null || ql_warn "occ app:update --all failed"
+  "$REPO/scripts/configure-office.sh" || ok=0
   ((!repair)) || app_occ maintenance:repair --include-expensive >/dev/null || ql_warn "occ maintenance:repair failed"
   ql_apply_units "$APP" "${units[@]}"
   app_env_record

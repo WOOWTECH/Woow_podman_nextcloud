@@ -10,7 +10,7 @@
 #    password still authenticates afterwards
 # 4. restores config.tgz (and data.tgz when it is in the backup); --with-html also replaces
 #    the whole html directory from a --cold backup, which is what a version rollback needs
-# 5. starts the app, refreshes the data fingerprint, leaves maintenance mode and smokes
+# 5. starts the app, leaves maintenance mode, refreshes the data fingerprint and smokes
 #
 # Unlike the old scripts/restore.sh this never calls `podman stop` behind systemd's back,
 # and it does not chown anything: the archives carry the numeric owners.
@@ -66,12 +66,14 @@ if ((with_html)); then
 fi
 [[ ! -f $src/config.tgz ]] || app_replace_dir "$html_dir/config" "$src/config.tgz" "pre-restore-$ts"
 [[ ! -f $src/data.tgz ]] || app_replace_dir "$data_dir" "$src/data.tgz" "pre-restore-$ts"
+[[ ! -f $src/gateway.conf ]] || install -m 644 -- "$src/gateway.conf" "$HOME/.config/nextcloud/gateway.conf"
 
 mapfile -t units < <(app_units)
 systemctl --user start "${units[@]}"
+[[ ! -f $src/gateway.conf ]] || systemctl --user restart nextcloud-gateway.service
 app_wait_status 900 || ql_die "Nextcloud did not come back; see: journalctl --user -u nextcloud-app.service -n 100"
-app_occ maintenance:data-fingerprint >/dev/null || ql_warn "occ maintenance:data-fingerprint failed"
-app_occ maintenance:mode --off >/dev/null || ql_warn "could not leave maintenance mode"
+app_occ maintenance:mode --off >/dev/null || ql_die "could not leave maintenance mode"
+app_occ maintenance:data-fingerprint >/dev/null || ql_die "occ maintenance:data-fingerprint failed"
 "$REPO/tests/smoke.sh" --timeout 900 || ql_die "restored, but the smoke test failed"
 ql_info "restore of $src complete"
 ql_info "the replaced directories are kept as *.pre-restore-$ts; remove them with podman unshare rm -rf when you are satisfied"

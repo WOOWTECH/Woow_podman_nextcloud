@@ -3,7 +3,7 @@
 # It replaces the host networking of the old manual deployment. There, PostgreSQL trusted
 # every connection from 127.0.0.1 and Redis had no password, so any local process - and
 # every other host-network container on the machine - could reach the database as a
-# superuser. On this bridge only the three Nextcloud containers can.
+# superuser. The new stack uses this bridge for its five private containers.
 [Unit]
 Description=Nextcloud bridge network
 Documentation=https://github.com/WOOWTECH/Woow_podman_nextcloud

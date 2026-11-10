@@ -1,8 +1,8 @@
 # Nextcloud on rootless Podman（Quadlet + systemd）
 
-以 **rootless Podman Quadlet unit** 部署 [Nextcloud](https://nextcloud.com/)，搭配 PostgreSQL 16
+以 **rootless Podman Quadlet unit** 部署 [Nextcloud 35.0.1](https://nextcloud.com/)、Collabora Office、PostgreSQL 16
 （pgvector）與 Redis，全部交由使用者的 systemd 管理。unit 就是部署本身：開機自動啟動（需要
-linger）、容器當掉時自動重啟、背景工作由 timer 執行，所有版本都釘選在這個 repo 裡。
+linger）、容器當掉時自動重啟、背景工作由 timer 執行，容器映像版本釘選在這個 repo 裡。
 
 [English version](README.md)
 
@@ -11,18 +11,13 @@ linger）、容器當掉時自動重啟、背景工作由 timer 執行，所有�
 ```
         systemctl --user start|stop|restart nextcloud.target
                               │
-   ┌──────────────────────────┼───────────────────────────┐
-   │                          │                           │
-nextcloud-db.service   nextcloud-redis.service   nextcloud-app.service
-pgvector/pgvector      redis:8.10.1-alpine       nextcloud:34.0.3-apache
- :0.8.6-pg16                 │                           │
-   │ HOST_POSTGRES_DIR       │ HOST_REDIS_DIR            │ HOST_HTML_DIR
-   │                         │                           │ HOST_DATA_DIR
-   └──────────── network nextcloud-network ──────────────┘
-                                                          │
-                              PublishPort HOST_BIND:HOST_PORT -> 80
-                              （預設 127.0.0.1:18080；對外由 Cloudflare
-                                Tunnel 或 NPM 提供）
+   ├─ nextcloud-db.service       PostgreSQL 16 + pgvector
+   ├─ nextcloud-redis.service    Redis AOF
+   ├─ nextcloud-app.service      Nextcloud 35.0.1 + 媒體、SMB、DAV 工具
+   ├─ nextcloud-office.service   Collabora CODE 26.04.4.2
+   └─ nextcloud-gateway.service  Nextcloud 與 Office 共用入口
+      PublishPort HOST_BIND:HOST_PORT -> 8080（預設 127.0.0.1:18081）
+      / -> Nextcloud；/hosting、/browser、/cool -> Collabora
 
         nextcloud-cron.timer ──每 5 分鐘──> nextcloud-cron.service
               podman exec -u www-data nextcloud-app php -f cron.php
@@ -34,13 +29,15 @@ pgvector/pgvector      redis:8.10.1-alpine       nextcloud:34.0.3-apache
 | `quadlet/nextcloud-db.container` | `nextcloud-db.service` | PostgreSQL 16 + pgvector |
 | `quadlet/nextcloud-redis.container` | `nextcloud-redis.service` | 分散式快取與檔案鎖 |
 | `quadlet/nextcloud-app.container` | `nextcloud-app.service` | Nextcloud（Apache，容器內 80 埠） |
+| `quadlet/nextcloud-office.container` | `nextcloud-office.service` | Collabora CODE，僅私有網路 9980 埠，文件暫存使用 2 GiB tmpfs |
+| `quadlet/nextcloud-gateway.container` | `nextcloud-gateway.service` | 同源 HTTP 入口 |
 | `systemd/nextcloud-cron.service` | `nextcloud-cron.service` | 執行一次 `cron.php` |
 | `systemd/nextcloud-cron.timer` | `nextcloud-cron.timer` | 每 5 分鐘 |
 | `systemd/nextcloud.target` | `nextcloud.target` | 一次操作整個堆疊 |
 
 安裝位置：`~/.config/containers/systemd/`（Quadlet）、`~/.config/systemd/user/`（target、cron
-service 與 timer）、`~/.config/nextcloud/nextcloud.env`（設定，權限 0600）。密碼一律使用
-podman secret，不會出現在環境檔裡。
+service 與 timer）、`~/.config/nextcloud/nextcloud.env`（設定，權限 0600）。資料庫、管理員與 Office
+管理介面密碼使用 podman secret；選用的 SMTP 密碼可放在私有環境檔中。
 
 **不再有 cron 容器。** 舊的 `nextcloud-cron` 容器跑的是 busybox crond；改成 `Type=oneshot`
 service 加 timer 之後，執行不會重疊、可以用 `systemctl --user list-timers` 看到下一次時間，
@@ -54,7 +51,7 @@ service 加 timer 之後，執行不會重疊、可以用 `systemctl --user list
 
 - Ubuntu 24.04 或同級系統，**podman >= 4.9.3** rootless，systemd 255 使用者 unit
 - 服務帳號啟用 linger（`sudo loginctl enable-linger $USER`），登出後堆疊才會繼續執行
-- 映像檔約 1.3 GB，另外還要放 html 目錄（約 900 MB）、資料庫與使用者檔案
+- 映像及初始 html 目錄至少需 6 GB 可用空間，另需容納資料庫與使用者檔案
 - PostgreSQL 目錄必須放在**本機磁碟**（不可用 NFS 或 SMB），`install.sh` 會檢查
 
 ```bash
@@ -68,7 +65,7 @@ git clone https://github.com/WOOWTECH/Woow_podman_nextcloud ~/woow-quadlet/Woow_
 cd ~/woow-quadlet/Woow_podman_nextcloud
 tests/dryrun.sh                               # 選用：驗證所有 unit，不會建立任何東西
 scripts/install.sh                            # 第一次執行：建立設定檔後停下
-$EDITOR ~/.config/nextcloud/nextcloud.env     # 四個 HOST_*_DIR 路徑與信任網域
+$EDITOR ~/.config/nextcloud/nextcloud.env     # 資料路徑、公開網址與信任網域
 scripts/install.sh                            # 安裝、啟動並執行 smoke 測試
 ```
 
@@ -79,9 +76,11 @@ scripts/install.sh                            # 安裝、啟動並執行 smoke �
 podman secret inspect --showsecret nextcloud-admin-password
 ```
 
-接著打開 `http://127.0.0.1:18080/`（或你設定的 `HOST_BIND:HOST_PORT`）。
+接著打開 `http://127.0.0.1:18081/`（或你設定的 `NEXTCLOUD_PUBLIC_URL`）。
 **你用來連線的每一個名稱或位址都必須列在 `NEXTCLOUD_TRUSTED_DOMAINS`**，否則 Nextcloud 會
 回應「透過不信任的網域存取」。
+編輯 Office 文件時，瀏覽器必須使用與 `NEXTCLOUD_PUBLIC_URL` 完全相同的來源；其他已信任
+位址可能看得到檔案列表，但 Office 的 iframe 會被瀏覽器封鎖。
 
 其他選項：`--db-password-file F` 與 `--admin-password-file F`（僅第一次安裝）、`--no-start`、
 `--no-smoke`、`--smoke-timeout S`、`--dry-run`（只算出結果並驗證）。
@@ -97,16 +96,21 @@ podman secret inspect --showsecret nextcloud-admin-password
 | 鍵 | 預設值 | 意義 |
 |---|---|---|
 | `HOST_BIND` | `127.0.0.1` | 發布位址。`0.0.0.0` 代表對所有介面開放 |
-| `HOST_PORT` | `18080` | 發布的埠（容器內 Apache 聽 80） |
+| `HOST_PORT` | `18081` | 發布的埠（容器內入口聽 8080） |
 | `HOST_HTML_DIR` | `%h/.local/share/nextcloud/html` | `/var/www/html`：程式碼、app 與 `config/config.php` |
 | `HOST_DATA_DIR` | `%h/.local/share/nextcloud/data` | `/var/www/html/data`：使用者檔案，會一直長大的就是它 |
 | `HOST_POSTGRES_DIR` | `%h/.local/share/nextcloud/postgres` | PGDATA，只能放本機磁碟 |
 | `HOST_REDIS_DIR` | `%h/.local/share/nextcloud/redis` | Redis append-only 檔案 |
 | `NEXTCLOUD_ADMIN_USER` | `admin` | 僅第一次安裝時使用 |
 | `NEXTCLOUD_TRUSTED_DOMAINS` | `localhost 127.0.0.1` | 以空白分隔，第一次啟動時寫入 |
+| `NEXTCLOUD_PUBLIC_URL` | `http://127.0.0.1:18081` | 瀏覽器與 Office WOPI 的標準入口 |
+| `COLLABORA_SERVER_NAME` | `127.0.0.1:18081` | 公開主機與選用埠號，不含協定 |
+| `COLLABORA_SSL_TERMINATION` | `false` | `NEXTCLOUD_PUBLIC_URL` 為 HTTPS 時設成 `true` |
+| `DEFAULT_PHONE_REGION` | `TW` | 電話區碼預設地區 |
 | `OVERWRITEPROTOCOL` | 空白 | 前面有 TLS 代理或 tunnel 但不送 `X-Forwarded-Proto` 時設為 `https` |
 | `OVERWRITECLIURL`、`TRUSTED_PROXIES` | 空白 | 由映像檔的 `reverse-proxy.config.php` 讀取 |
-| `PHP_MEMORY_LIMIT`、`PHP_UPLOAD_LIMIT` | `512M` | PHP 限制 |
+| `PHP_MEMORY_LIMIT`、`PHP_UPLOAD_LIMIT` | `1024M`、`16G` | PHP 限制；實際可上傳大小仍受磁碟空間限制 |
+| `SMTP_*`、`MAIL_*` | 空白 | 官方映像支援的選用郵件設定 |
 
 每個 `HOST_*_DIR` 都是絕對路徑，或以 `%h/` 開頭代表家目錄。已經有 Nextcloud 資料的路徑會
 原地沿用，不會複製也不會搬移（決策 D9）。
@@ -125,6 +129,7 @@ podman secret inspect --showsecret nextcloud-admin-password
 |---|---|
 | `nextcloud-db-password` | `POSTGRES_PASSWORD`：initdb，以及 Nextcloud 第一次安裝 |
 | `nextcloud-admin-password` | `NEXTCLOUD_ADMIN_PASSWORD`：僅安裝時使用，之後會被忽略 |
+| `nextcloud-office-password` | Collabora 管理介面登入（使用者 `admin`） |
 
 Nextcloud 安裝完成後，是以 `config.php` 裡的 `dbpassword` 用 `oc_admin` 這個角色連線；那份
 設定屬於 html 目錄裡的 Nextcloud 自有狀態。
@@ -172,13 +177,16 @@ podman exec nextcloud-db psql -U nextcloud -d nextcloud -c "SELECT extname, extv
 
 ### 搭配 Cloudflare Tunnel 或 Nginx Proxy Manager
 
-`HOST_BIND` 維持 `127.0.0.1`，把 tunnel 或代理指向 `http://localhost:18080`，並在
+`HOST_BIND` 維持 `127.0.0.1`，把 tunnel 或代理指向 `http://localhost:18081`，並在
 `~/.config/nextcloud/nextcloud.env` 設定：
 
 ```ini
 OVERWRITEPROTOCOL=https
 OVERWRITECLIURL=https://cloud.example.com
-TRUSTED_PROXIES=127.0.0.1
+NEXTCLOUD_PUBLIC_URL=https://cloud.example.com
+COLLABORA_SERVER_NAME=cloud.example.com
+COLLABORA_SSL_TERMINATION=true
+TRUSTED_PROXIES=10.89.0.0/16
 NEXTCLOUD_TRUSTED_DOMAINS=localhost cloud.example.com
 ```
 
@@ -191,7 +199,8 @@ tunnel 本身由
 
 ## 升級
 
-repo 就是版本的唯一真相：修改 `quadlet/nextcloud-app.container` 的 `Image=` 並 commit，然後：
+repo 就是版本的唯一真相：一起修改 `quadlet/nextcloud-app.container` 的映像標籤與
+`Containerfile` 的基底映像 digest，commit 後再執行：
 
 ```bash
 git pull
@@ -239,10 +248,10 @@ systemd-run --user --on-calendar='*-*-* 03:30:00' --unit=nextcloud-backup \
 
 ```bash
 scripts/uninstall.sh                 # 停止並移除 unit 與 timer，資料全部保留
-scripts/uninstall.sh --purge --yes   # 另外刪除網路與兩個 secret
+scripts/uninstall.sh --purge --yes   # 另外刪除網路與三個 secret
 ```
 
-`--purge` 會先把兩個 secret 與設定檔匯出到 `~/backups/nextcloud/purge-<timestamp>/`，而且
+`--purge` 會先把三個 secret 與設定檔匯出到 `~/backups/nextcloud/purge-<timestamp>/`，而且
 **絕對不會**刪掉四個資料目錄：它只會印出對應的 `podman unshare rm -rf` 指令，避免打錯路徑
 就毀掉使用者檔案。
 

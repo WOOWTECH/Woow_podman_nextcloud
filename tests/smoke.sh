@@ -43,8 +43,8 @@ check() {
 }
 
 # 1. units (the cron service is oneshot: it is not "active" between runs)
-for u in "$TARGET" nextcloud-db.service nextcloud-redis.service nextcloud-app.service nextcloud-cron.timer; do
-  check "$u is active" systemctl --user is-active --quiet "$u"
+for u in "$TARGET" nextcloud-db.service nextcloud-redis.service nextcloud-app.service nextcloud-office.service nextcloud-gateway.service nextcloud-cron.timer; do
+  check "$u is active" ql_wait_until "$timeout" "$u to become active" systemctl --user is-active --quiet "$u"
 done
 
 # 2. podman healthchecks
@@ -73,6 +73,14 @@ redishost=$(app_occ config:system:get redis host 2>/dev/null | tr -d '\r\n' || t
 if [[ $redishost == "$REDIS_CONTAINER" ]]; then ok "redis host is $redishost"; else bad "redis host is '${redishost:-?}', expected $REDIS_CONTAINER"; fi
 pong=$(podman exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | tr -d '\r\n' || true)
 if [[ $pong == PONG ]]; then ok "redis answers PONG"; else bad "redis-cli ping returned '${pong:-nothing}'"; fi
+discovery=$(curl -fsS -m 15 "$(app_base_url)/hosting/discovery" 2>/dev/null || true)
+if [[ $discovery == *'<wopi-discovery'* ]]; then
+  ok "Collabora discovery is served on the Nextcloud origin"
+else
+  bad "Collabora discovery is unavailable"
+fi
+rich=$(app_occ config:app:get richdocuments enabled 2>/dev/null | tr -d '\r\n' || true)
+if [[ $rich == yes ]]; then ok "richdocuments is enabled"; else bad "richdocuments is not enabled"; fi
 
 # 5. the background jobs really run
 if systemctl --user start nextcloud-cron.service 2>/dev/null; then
