@@ -27,7 +27,7 @@ jobs:
       - name: Install shellcheck
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck
+          sudo apt-get install -y shellcheck podman
           shellcheck --version | sed -n 2p
 
       - name: shellcheck the test doubles
@@ -38,3 +38,6 @@ jobs:
 
       - name: Legacy version-check pre-flight (pipefail-safety, not-cached-locally)
         run: tests/version-check.sh
+
+      - name: Configuration backup across rootless UID permissions
+        run: bash tests/rootless-config-backup.sh
