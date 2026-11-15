@@ -27,7 +27,7 @@ After=nextcloud-db.service nextcloud-redis.service
 ContainerName=nextcloud-app
 # Upgrades: ONE major version at a time. scripts/upgrade.sh refuses anything else, because
 # the image's entrypoint would refuse it after the old container is already gone.
-Image=docker.io/library/nextcloud:34.0.3-apache
+Image=docker.io/library/nextcloud:35.0.3-apache
 Network=nextcloud.network
 Volume=@@HOST_HTML_DIR@@:/var/www/html
 Volume=@@HOST_DATA_DIR@@:/var/www/html/data

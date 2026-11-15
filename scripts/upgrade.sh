@@ -58,10 +58,7 @@ if [[ $cur == "$tgt" ]]; then
   ql_info "Nextcloud is already at $tgt; applying unit changes only"
   version_change=0
 else
-  [[ $(printf '%s\n%s\n' "$cur" "$tgt" | sort -V | head -n1) == "$cur" ]] \
-    || ql_die "downgrade $cur -> $tgt is not supported by Nextcloud; restore a backup instead"
-  ((10#${tgt%%.*} <= 10#${cur%%.*} + 1)) \
-    || ql_die "one major version at a time: $cur -> $tgt skips $((10#${cur%%.*} + 1)); pin the latest $((10#${cur%%.*} + 1)).x-apache image first"
+  app_validate_transition "$cur" "$tgt"
   version_change=1
 fi
 pg_cur=$(app_pg_major_running)
@@ -83,7 +80,7 @@ bk=$("$REPO/scripts/backup.sh" --cold --no-data --dest "$BACKUP_ROOT/upgrade-$(d
 # ---- 4. install, wait for the entrypoint, post-upgrade tasks ----------------------------------------
 ts=$(date +%Y%m%d-%H%M%S)
 ok=1
-if ! "$REPO/scripts/install.sh" --no-start --no-smoke; then
+if ! "$REPO/scripts/install.sh" --allow-image-change --no-start --no-smoke; then
   ql_warn "install.sh failed before anything restarted; putting the previous units back"
   ql_install_files "$bk/units" "$APP" --prune >/dev/null
   systemctl --user daemon-reload
@@ -104,7 +101,7 @@ if ((ok)); then
   app_occ db:add-missing-indices >/dev/null || ql_warn "occ db:add-missing-indices failed"
   app_occ db:add-missing-columns >/dev/null || ql_warn "occ db:add-missing-columns failed"
   app_occ db:add-missing-primary-keys >/dev/null || ql_warn "occ db:add-missing-primary-keys failed"
-  app_occ app:update --all >/dev/null || ql_warn "occ app:update --all failed"
+  ql_info "app versions retained; review compatibility before an explicit app update"
   ((!repair)) || app_occ maintenance:repair --include-expensive >/dev/null || ql_warn "occ maintenance:repair failed"
   ql_apply_units "$APP" "${units[@]}"
   app_env_record

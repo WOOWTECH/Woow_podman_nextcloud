@@ -3,7 +3,7 @@
 # systemd --user, linger). Idempotent: a re-run with nothing changed restarts nothing.
 #
 #   scripts/install.sh [--db-password-file F] [--admin-password-file F] [--no-start]
-#                      [--no-smoke] [--smoke-timeout S] [--dry-run]
+#                      [--no-smoke] [--smoke-timeout S] [--dry-run] [--allow-image-change]
 #
 #   --db-password-file F      first install only: the PostgreSQL password comes from F
 #   --admin-password-file F   first install only: the Nextcloud admin password comes from F
@@ -24,12 +24,13 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=app.sh
 . "$REPO/scripts/app.sh"
 
-db_pw_file='' admin_pw_file='' no_start=0 no_smoke=0 smoke_timeout=900
+db_pw_file='' admin_pw_file='' no_start=0 no_smoke=0 smoke_timeout=900 allow_image_change=0
 while (($#)); do
   case $1 in
     --db-password-file) db_pw_file=${2:?--db-password-file needs a file}; shift ;;
     --admin-password-file) admin_pw_file=${2:?--admin-password-file needs a file}; shift ;;
     --no-start) no_start=1 ;;
+    --allow-image-change) allow_image_change=1 ;;
     --no-smoke) no_smoke=1 ;;
     --smoke-timeout) smoke_timeout=${2:?--smoke-timeout needs seconds}; shift ;;
     --dry-run) export QL_DRY_RUN=1 ;;
@@ -72,6 +73,18 @@ if podman container exists nextcloud-cron && [[ $(podman inspect --format '{{.St
 fi
 for k in "${DATA_DIR_KEYS[@]}"; do ql_check_path_mounted "$(app_dir "$k")" "${containers[@]%%:*}"; done
 
+# Only upgrade.sh should replace an installed release: it owns backup/rollback.
+installed_version=$(app_installed_version)
+if [[ -z $installed_version && -f $QDIR/nextcloud-app.container ]]; then
+  installed_version=$(app_tag "$(app_installed_image nextcloud-app.container)")
+  installed_version=${installed_version%-apache}
+fi
+target_version=$(app_tag "$APP_IMAGE")
+target_version=${target_version%-apache}
+if [[ -n $installed_version && $installed_version != "$target_version" ]] && ((!allow_image_change)); then
+  ql_die "installed $installed_version differs from $target_version; use scripts/upgrade.sh for a backed-up transition"
+fi
+
 # ---- 4. stage, render, validate -----------------------------------------------------------
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/$APP-install.XXXXXX")
 ql_cleanup work rm -rf "$WORK"
@@ -109,8 +122,13 @@ else
   ql_secret_ensure "$SECRET_ADMIN" random:24
 fi
 
+if app_office_enabled; then ql_secret_ensure nextcloud-office-password random:32; fi
+
 # ---- 6. install changed files, then start / restart only what changed ---------------------
+gateway_changed=0
+if app_office_enabled && ! cmp -s "$WORK/out/config/gateway.conf" "$HOME/.config/nextcloud/gateway.conf"; then gateway_changed=1; fi
 changed=$(ql_install_files "$WORK/out" "$APP")
+if ((gateway_changed)); then ql_mark_changed "$APP" nextcloud-gateway.service; fi
 [[ -z $changed ]] || ql_info "changed: $(tr '\n' ' ' <<<"$changed")"
 [[ $render_env != "$ENV_FILE" ]] || app_env_mark_if_changed
 if [[ $dry == 1 ]]; then

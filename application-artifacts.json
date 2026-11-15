@@ -1,0 +1,22 @@
+{
+  "richdocuments": {
+    "version": "12.0.1",
+    "url": "https://github.com/nextcloud-releases/richdocuments/releases/download/v12.0.1/richdocuments-v12.0.1.tar.gz",
+    "sha256": "0639ab0e3413142a76334af20ca88cba0a351a11c9c07effa0f1eb7f05941f2c",
+    "nextcloud_major": 35
+  },
+  "text_compatibility": {
+    "version": "9.0.2",
+    "url": "https://download.nextcloud.com/server/releases/nextcloud-35.0.3.tar.bz2",
+    "sha256": "58401440ce81b7f8d445a8c2a8027572b616ef83592f96b121fd15ec8a1aed35",
+    "nextcloud_major": 35,
+    "scope": "optional signed app fix for existing 34.0.6 to 35.0.1 upgrades; not a core image update"
+  },
+  "richdocuments_existing_compatibility": {
+    "version": "12.0.2",
+    "url": "https://github.com/nextcloud-releases/richdocuments/releases/download/v12.0.2/richdocuments-v12.0.2.tar.gz",
+    "sha256": "5deacee4fa1bb8eb7068e86c6dadbdaf0e44f8c79df0298a2254f562e3ed949b",
+    "nextcloud_major": 35,
+    "scope": "existing device app-store update during official Text migration; original fresh-device pin retained"
+  }
+}

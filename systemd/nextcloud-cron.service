@@ -13,6 +13,7 @@ After=nextcloud-app.service
 [Service]
 Type=oneshot
 ExecCondition=/usr/bin/podman container exists nextcloud-app
+ExecCondition=/usr/bin/podman exec -u www-data nextcloud-app php -r "@include '/var/www/html/config/config.php'; exit((get_defined_vars()['CONFIG']['installed'] ?? false) ? 0 : 1);"
 ExecStart=/usr/bin/podman exec -u www-data nextcloud-app php -f /var/www/html/cron.php
 # Type=oneshot plus a timer never overlaps runs; this only bounds a stuck one.
 TimeoutStartSec=30min

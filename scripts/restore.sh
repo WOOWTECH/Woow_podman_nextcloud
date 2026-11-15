@@ -50,7 +50,8 @@ app_confirm "restore replaces the Nextcloud database and configuration with $src
 
 ts=$(date +%Y%m%d-%H%M%S)
 ql_info "stopping the cron timer and the app (PostgreSQL keeps running)"
-systemctl --user stop nextcloud-cron.timer nextcloud-app.service
+systemctl --user stop nextcloud-cron.timer nextcloud-cron.service nextcloud-app.service
+if app_office_enabled; then systemctl --user stop nextcloud-gateway.service nextcloud-office.service; fi
 systemctl --user start nextcloud-db.service
 QL_HEALTH_ACTIVE=1 ql_wait_container_healthy "$DB_CONTAINER" 300 || ql_die "$DB_CONTAINER is not healthy"
 
