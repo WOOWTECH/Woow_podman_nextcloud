@@ -41,3 +41,9 @@ jobs:
 
       - name: Configuration backup across rootless UID permissions
         run: bash tests/rootless-config-backup.sh
+
+      - name: Office artifacts and deployment regression checks
+        run: |
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          bash tests/office-render.sh
+          bash tests/version-transition.sh

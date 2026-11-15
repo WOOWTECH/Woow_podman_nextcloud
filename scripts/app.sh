@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck source-path=SCRIPTDIR
 # shellcheck disable=SC2034 # these settings are read by the scripts that source this file
 # scripts/app.sh: Nextcloud settings and helpers shared by scripts/*.sh and tests/smoke.sh.
 # Sourced after scripts/lib/quadlet-lib.sh (the vendored lib, never edited here).
@@ -42,18 +43,31 @@ app_installed_image() {
   [[ -f $f ]] && i=$(sed -n 's/^Image=//p' "$f" | tail -n1)
   if [[ -n $i ]]; then printf '%s' "$i"; else app_pin "$1"; fi
 }
-APP_IMAGE=$(app_pin nextcloud-app.container)
+# Explicit bridge image for a staged 34 -> 35 upgrade; never use a moving tag.
+APP_IMAGE=${WOOW_NEXTCLOUD_IMAGE:-$(app_pin nextcloud-app.container)}
+if [[ -n ${WOOW_NEXTCLOUD_IMAGE:-} ]]; then
+case $APP_IMAGE in
+  docker.io/library/nextcloud:34.0.6-apache|docker.io/library/nextcloud:35.0.3-apache) ;;
+  *) ql_die "unsupported WOOW_NEXTCLOUD_IMAGE: use a reviewed pinned release" ;;
+esac
+fi
 DB_IMAGE=$(app_pin nextcloud-db.container)
 REDIS_IMAGE=$(app_pin nextcloud-redis.container)
+
+# shellcheck source=render-args.sh
+. "$REPO/scripts/render-args.sh"
+app_office_enabled() { [[ $(ql_env_get WOOW_OFFICE_ENABLED 0) == 1 ]]; }
 
 # ---- per-host settings --------------------------------------------------------------------
 app_units() {
   printf '%s\n' "$TARGET" nextcloud-db.service nextcloud-redis.service nextcloud-app.service \
     nextcloud-cron.timer nextcloud-cron.service
+  if app_office_enabled; then printf '%s\n' nextcloud-office.service nextcloud-gateway.service; fi
 }
 app_containers() {
   printf '%s\n' "$DB_CONTAINER:nextcloud-db.service" "$REDIS_CONTAINER:nextcloud-redis.service" \
     "$APP_CONTAINER:nextcloud-app.service"
+  if app_office_enabled; then printf '%s\n' nextcloud-office:nextcloud-office.service nextcloud-gateway:nextcloud-gateway.service; fi
 }
 
 # app_spec_path <abs path>: rewrite $HOME/... as %h/... so a rendered unit carries no
@@ -78,6 +92,11 @@ app_ensure_dir() {
 # app_validate_env: dies on a value the units or Nextcloud cannot work with
 app_validate_env() {
   local port k d fs html
+  local -a RENDER_ARGS=()
+  render_args "$ENV_FILE"
+  if ! app_office_enabled && [[ -f $QDIR/nextcloud-office.container ]]; then
+    ql_die "Office is installed: keep WOOW_OFFICE_ENABLED=1 until a separate removal plan is applied"
+  fi
   ql_assert_match HOST_BIND "$(ql_env_get HOST_BIND)" '[0-9]{1,3}(\.[0-9]{1,3}){3}|\[[0-9A-Fa-f:.]+\]'
   port=$(ql_env_get HOST_PORT)
   ql_assert_match HOST_PORT "$port" '[0-9]{1,5}'
@@ -121,7 +140,15 @@ app_render() {
   local w=$1 env=$2
   mkdir -p "$w/src" "$w/out"
   cp -p "$REPO"/quadlet/*.container "$REPO"/quadlet/*.network "$REPO"/systemd/* "$w/src/"
-  ql_render "$w/src" "$env" "$REPO/quadlet/render-vars" "$w/out"
+  local -a RENDER_ARGS=()
+  render_args "$env"
+  if app_office_enabled; then cp -p "$REPO"/quadlet/optional/*.container "$w/src/"; fi
+  sed -i "s|^Image=.*|Image=$APP_IMAGE|" "$w/src/nextcloud-app.container"
+  ql_render "$w/src" "$env" "$REPO/quadlet/render-vars" "$w/out" "${RENDER_ARGS[@]}"
+  if app_office_enabled; then
+    mkdir -p "$w/out/config"
+    cp -p "$REPO/config/gateway.conf" "$w/out/config/gateway.conf"
+  fi
   ql_dryrun "$w/out" --verify --ref-dir "$QDIR" || ql_die "the rendered units failed the dry-run; nothing was installed"
 }
 
@@ -134,7 +161,12 @@ app_snapshot_units() {
   mkdir -p "$dest"
   while read -r sha path; do
     [[ -n $sha && -f $path ]] || continue
-    cp -p -- "$path" "$dest/"
+    if [[ $path == "$(_ql_config_root)/$APP/"* ]]; then
+      mkdir -p "$dest/config"
+      cp -p -- "$path" "$dest/config/"
+    else
+      cp -p -- "$path" "$dest/"
+    fi
   done <"$(app_manifest)"
 }
 app_env_hash() { sha256sum <"$ENV_FILE" | cut -d' ' -f1; }
@@ -443,4 +475,16 @@ app_legacy_restore() {
       ql_die "neither the renamed container ${sfx:+$c-legacy-$sfx }nor a rollback copy in $bk exists; restore $c by hand"
     fi
   done
+}
+
+# An explicit supported intermediate release is required before crossing majors.
+app_validate_transition() {
+  local cur=$1 tgt=$2
+  [[ $(printf '%s\n%s\n' "$cur" "$tgt" | sort -V | head -n1) == "$cur" ]] \
+    || ql_die "downgrade $cur -> $tgt is not supported; restore a backup instead"
+  ((10#${tgt%%.*} <= 10#${cur%%.*} + 1)) \
+    || ql_die "one major version at a time: $cur -> $tgt skips an intermediate release"
+  if [[ ${cur%%.*} == 34 && ${tgt%%.*} == 35 && $(printf '%s\n%s\n' "$cur" 34.0.6 | sort -V | head -n1) != 34.0.6 ]]; then
+    ql_die "upgrade to reviewed 34.0.6 first: WOOW_NEXTCLOUD_IMAGE=docker.io/library/nextcloud:34.0.6-apache scripts/upgrade.sh"
+  fi
 }

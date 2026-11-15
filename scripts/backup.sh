@@ -72,7 +72,7 @@ app_dump_roles "$dest/roles.sql"
 app_backup_config "$html_dir" "$dest/config.tgz"
 ((no_data)) || ql_backup_dir "$data_dir" "$dest/data.tgz" >/dev/null
 mkdir -p "$dest/secrets"
-for s in "$SECRET_DB" "$SECRET_ADMIN"; do
+for s in "$SECRET_DB" "$SECRET_ADMIN" nextcloud-office-password; do
   if podman secret exists "$s"; then app_save_secret "$s" "$dest/secrets/$s"; fi
 done
 [[ ! -f $ENV_FILE ]] || cp -p -- "$ENV_FILE" "$dest/"

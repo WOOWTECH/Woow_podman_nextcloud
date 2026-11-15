@@ -377,3 +377,7 @@ MIT License — see [LICENSE](LICENSE).
 
 - **K3s / Kubernetes (Helm chart)** → [Woow_k3s_nextcloud](https://github.com/WOOWTECH/Woow_k3s_nextcloud)
 - **Home Assistant add-on** → [Woow_ha_nextcloud](https://github.com/WOOWTECH/Woow_ha_nextcloud)
+
+## N100 cold boot, Office and reviewed Nextcloud 35 maintenance
+
+See [deployment and maintenance instructions](docs/n100-deployment.md) before upgrading an existing installation. The current pin is 35.0.3; older 34.x must first reach the reviewed 34.0.6 bridge release. Office is optional and keeps the existing application port.
