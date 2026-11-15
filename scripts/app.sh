@@ -239,6 +239,25 @@ app_restore_roles() {
   podman exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d postgres -q >/dev/null 2>&1 <"$1" || true
 }
 
+# app_backup_config <html_dir> <archive>: html can be private to container UID 33.
+# Both the existence check and traversal must run in Podman's user namespace.
+# A running, installed Nextcloud without its configuration is not a valid backup.
+app_backup_config() {
+  local html=${1:?html directory required} archive=${2:?archive required}
+  [[ ! -e $archive && ! -L $archive && ! -e $archive.partial && ! -L $archive.partial ]] \
+    || ql_die "configuration backup already exists: $archive"
+  podman unshare test -d "$html/config" \
+    || ql_die "cannot access Nextcloud config in the Podman user namespace"
+  if ! podman unshare sh -c 'umask 077; exec tar --numeric-owner -czf "$1" -C "$2" -- config' \
+    woow-config-backup "$archive.partial" "$html"; then
+    rm -f -- "$archive.partial"
+    ql_die "Nextcloud configuration archive failed"
+  fi
+  mv -- "$archive.partial" "$archive"
+  (cd -- "$(dirname -- "$archive")" && umask 077 && sha256sum -- "${archive##*/}" >"${archive##*/}.sha256")
+  ql_info "archived Nextcloud configuration in the Podman user namespace"
+}
+
 # app_write_checksums <dir>
 app_write_checksums() {
   local list

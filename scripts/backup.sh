@@ -69,11 +69,7 @@ app_maintenance on
 maint=1
 app_dump_db "$dest/nextcloud.pgdump"
 app_dump_roles "$dest/roles.sql"
-if [[ -d $html_dir/config ]]; then
-  ql_backup_dir "$html_dir/config" "$dest/config.tgz" >/dev/null
-else
-  ql_warn "$html_dir/config does not exist yet; the backup has no config.tgz"
-fi
+app_backup_config "$html_dir" "$dest/config.tgz"
 ((no_data)) || ql_backup_dir "$data_dir" "$dest/data.tgz" >/dev/null
 mkdir -p "$dest/secrets"
 for s in "$SECRET_DB" "$SECRET_ADMIN"; do
